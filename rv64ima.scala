@@ -1,7 +1,60 @@
+The current RV64IMA core implementation is quite minimal and lacks several important features. Here's a list of some missing features:
+
+    Instruction decoding: The current implementation only handles a few ALU operations. You'll need to implement full instruction decoding for all RV64I instructions, including load/store, branches, jumps, and other operations.
+
+    Immediate extraction: The immediate value extraction for various instruction types (I, S, B, U, and J) is not implemented. You'll need to properly extract the immediate values based on the instruction type.
+
+    Branch and jump instructions: The current implementation does not handle control flow instructions like branches, jumps, and jump-and-link. You'll need to modify the PC update logic and implement the appropriate control logic for these instructions.
+
+    Load and store instructions: Load and store instructions are not fully implemented. You'll need to handle different data types (byte, half-word, word, double-word) and sign extension as necessary.
+
+    Hazard detection and forwarding: The current implementation does not handle data hazards or forwarding. You'll need to implement hazard detection logic and forwarding paths to avoid pipeline stalls and improve performance.
+
+    CSR (Control and Status Registers) and system instructions: The current implementation lacks support for CSR registers and system instructions like ECALL, EBREAK, MRET, and WFI.
+
+    Integer multiplication and division instructions (M extension): The current implementation does not support the M extension, which includes integer multiplication and division instructions. You'll need to add support for these instructions if you want a complete RV64IMA core.
+
+    Exception handling: The core should be able to handle exceptions and interrupts, including traps and system calls.
+
+    Reset logic: You might want to add a proper reset input and reset logic to initialize the core and its components on reset.
+
+    Performance counters: The RISC-V specification includes optional performance counters. You can add them to measure and optimize the performance of your core.
+
+    Testing and verification: Implement a proper testbench to test and verify the functionality of the core, covering all instructions and corner cases.
+
+
+
 import spinal.core._
 import spinal.lib._
 import spinal.lib.pipeline._
 
+// Helper case class for memory commands
+case class MemCmd(size: Int) extends Bundle {
+  val address = UInt(size bits)
+  val write = Bool()
+  val data = UInt(size bits)
+}
+
+object OpCode {
+  val LUI    = B"b0110111"
+  val AUIPC  = B"b0010111"
+  val JAL    = B"b1101111"
+  val JALR   = B"b1100111"
+  val BRANCH = B"b1100011"
+  val LOAD   = B"b0000011"
+  val STORE  = B"b0100011"
+  val OP_IMM = B"b0010011"
+  val OP     = B"b0110011"
+}
+
+object Funct3 {
+  val BEQ  = B"b000"
+  val BNE  = B"b001"
+  val BLT  = B"b100"
+  val BGE  = B"b101"
+  val BLTU = B"b110"
+  val BGEU = B"b111"
+}
 
 class PipelineController(stageCount: Int) extends Component {
   val io = new Bundle {
@@ -29,7 +82,6 @@ class PipelineController(stageCount: Int) extends Component {
   io.allowOutput := stageOutputAllowReg
 }
 
-
 class RV64IMA_Core extends Component {
   val io = new Bundle {
     val imem = master Flow (Bits(64 bits))
@@ -43,15 +95,16 @@ class RV64IMA_Core extends Component {
     pc := pc_next
   }
 
- class ID_Stage extends Stage {
-  val instr = io.imem.payload
-  val opcode = instr(6 downto 0)
-  val funct3 = instr(14 downto 12)
-  val funct7 = instr(31 downto 25)
+  // ID (Instruction Decode) stage
+  class ID_Stage extends Stage {
+    val instr = io.imem.payload
+    val opcode = instr(6 downto 0)
+    val funct3 = instr(14 downto 12)
+    val funct7 = instr(31 downto 25)
 
-  val rd = instr(11 downto 7)
-  val rs1 = instr(19 downto 15)
-  val rs2 = instr(24 downto 20)
+    val rd = instr(11 downto 7)
+    val rs1 = instr(19 downto 15)
+    val rs2 = instr(24 downto 20
 
   val immI = instr(31 downto 20).asSInt.resize(64)  // I-Type
   val immS = (instr(31 downto 25) @@ instr(11 downto 7)).asSInt.resize(64)  // S-Type
