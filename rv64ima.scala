@@ -23,18 +23,30 @@
 
 // Exception handling: The core should be able to handle exceptions and interrupts, including traps and system calls.
 
- // Reset logic: You might want to add a proper reset input and reset logic to initialize the core and its components on reset.
+// Reset logic: You might want to add a proper reset input and reset logic to initialize the core and its components on reset.
 
- // Performance counters: The RISC-V specification includes optional performance counters. You can add them to measure and optimize 
- // the performance of your core.
+// Performance counters: The RISC-V specification includes optional performance counters. You can add them to measure and optimize 
+// the performance of your core.
 
- // Testing and verification: Implement a proper testbench to test and verify the functionality of the core, covering all instructions and corner cases.
+// Testing and verification: Implement a proper testbench to test and verify the functionality of the core, covering all instructions and corner cases.
 
+
+// The EX_Stage needs to be updated to handle the arithmetic and logical operations (e.g., add, sub, and, or, xor, etc.). Currently, it only handles the load and store instructions.
+
+// The WB_Stage needs to be updated to write the result of the execution stage to the destination register for arithmetic and logical operations.
+
+// The control flow instructions (branch, jump, jal, etc.) need to be fully implemented in the appropriate stages.
+
+// The sign extension in the load instructions (LB, LH, LW, LD, LBU, LHU) needs to be handled properly.
+
+// The store instructions (SB, SH, SW, SD) need to be implemented to store the correct data with the correct data size.
 
 
 import spinal.core._
 import spinal.lib._
 import spinal.lib.pipeline._
+import spinal.lib.bus.amba3.apb._
+import spinal.lib.bus.bmb._
 
 // Helper case class for memory commands
 case class MemCmd(size: Int) extends Bundle {
@@ -325,15 +337,39 @@ class WB_Stage extends Stage {
 }
 
 
-// Helper case class for memory commands
-case class MemCmd(size: Int) extends Bundle {
-  val address = UInt(size bits)
-  val write = Bool()
-  val data = UInt(size bits)
+
+                    
+                    
+
+class TopLevel extends Component {
+  val io = new Bundle {
+    val bus = slave(Bmb(Apb3(Apb3Config(16, 32))))
+    // Define other IO signals here
+  }
+
+  // Instantiate the RV64IMA core
+  val rv64ima = new RV64IMA_Core
+
+  // Connect the IO of the RV64IMA core to the BMB interface of the top-level component
+  rv64ima.io.imem << io.bus.cmd.payload
+  rv64ima.io.imem.valid := io.bus.cmd.valid
+  io.bus.cmd.ready := rv64ima.io.imem.ready
+
+  io.bus.rsp.valid := rv64ima.io.dmem.valid
+  io.bus.rsp.payload := rv64ima.io.dmem.data
+  rv64ima.io.dmem.ready := io.bus.rsp.ready
+
+  // Define clock and reset signals
+  val clock = in Bool
+  val reset = in Bool
+
+  // Connect the clock and reset signals to the RV64IMA core
+  rv64ima.clock := clock
+  rv64ima.reset := reset
 }
 
 // Create the spinalHDL configuration and generate the RTL
 object RV64IMA_Core_Gen extends App {
   val config = SpinalConfig()
-  config.generateVerilog(new RV64IMA_Core)
+  config.generateVerilog(new TopLevel)
 }
