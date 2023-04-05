@@ -12,13 +12,14 @@ import spinal.lib._
 import spinal.lib.fsm._
 
 case class AES_audio_rx() extends Component {
+  
   val io = new Bundle {
-    val audioIn = in Bool
-    val audioOut = out Vec(Bits(24 bits), 24)
-    val clk = in Bool
-    val rst = in Bool
+    val aesIn = in Stream Bool
+    val audioOut = out Stream(Vec(Bits(24 bits), 24)) // Maximum channels supported is 24
+    val detectedNumChannels = out UInt (log2Up(24 + 1) bits)
+    val detectedSampleRate = out(SampleRate())
   }
-
+  
   // Define the constants for the AES3 signal format
   val preamble = B"1111111111111110"
   val auxSize = 16
@@ -31,14 +32,14 @@ case class AES_audio_rx() extends Component {
   }
 
   val state = RegInit(State.idle)
-  val count = Reg(UInt(4 bits)) // Counter for tracking progress through the subframes
-  val channel = Reg(UInt(5 bits)) // Index of the current audio channel
-  val subframe = Reg(Bool) // Indicates which subframe (A or B) is being received
-  val frameCount = Reg(UInt(8 bits)) // Counts down the frames in a block
-  val auxData = Reg(Bits(auxSize bits)) // Buffer for auxiliary data in each frame
+  val count = Reg(UInt(4 bits))                // Counter for tracking progress through the subframes
+  val channel = Reg(UInt(5 bits))              // Index of the current audio channel
+  val subframe = Reg(Bool)                     // Indicates which subframe (A or B) is being received
+  val frameCount = Reg(UInt(8 bits))           // Counts down the frames in a block
+  val auxData = Reg(Bits(auxSize bits))        // Buffer for auxiliary data in each frame
   val audioData = Mem(Bits(24 * 32 bits), 192) // Buffer for audio data in each frame
-  val crc = Reg(Bits(32 bits)) // Received CRC word
-  val crcCalc = Reg(Bits(16 bits)) // Calculated CRC value
+  val crc = Reg(Bits(32 bits))                 // Received CRC word
+  val crcCalc = Reg(Bits(16 bits))             // Calculated CRC value
 
   // BMC decoder logic
   val shiftReg = Reg(UInt(4 bits))
