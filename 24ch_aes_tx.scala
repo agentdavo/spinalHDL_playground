@@ -67,17 +67,16 @@ case class AES_audio_tx() extends Component {
 
 
 object AES_audio_tx_tb extends App {
-  val audioInChannelCount = 24
-  val sampleRate = 48000
+  import SampleRate._
 
-  val compiled = SimConfig.withWave.compile(new AES_audio_tx(audioInChannelCount, sampleRate))
+  val compiled = SimConfig.withWave.compile(new AES_audio_tx())
 
   def randSignal(): Boolean = {
     Random.nextBoolean()
   }
 
   // Helper function to generate a test stream of audio data
-  def generateTestData(n: Int): Stream[Bits] = {
+  def generateTestData(n: Int, sampleRate: Int): Stream[Bits] = {
     Stream.iterate(B(0, 24 bits))(prev => {
       val next = B((0 until 24).map(_ => randSignal()): _*)
       sleep((1.0 / sampleRate * 1e12 / 2).toLong) // sleep for half a sample period
@@ -91,15 +90,18 @@ object AES_audio_tx_tb extends App {
     }
 
     val audioInDriver = fork {
+      dut.io.numChannels #= log2Up(24) // Set the number of channels (log2Up multiples of 2)
+      dut.io.sampleRate #= Hz_48000    // Set the sample rate
+
       // Generate a test stream of audio data
-      val testData = generateTestData(10000)
+      val testData = generateTestData(10000, 48000)
 
       testData.foreach { sample =>
         dut.io.audioIn.valid #= true
         dut.io.audioIn.payload #= sample
-        sleep((1.0 / sampleRate * 1e12 * 16).toLong) // sleep for 16 sample periods
+        sleep((1.0 / 48000 * 1e12 * 16).toLong) // sleep for 16 sample periods
         dut.io.audioIn.valid #= false
-        sleep((1.0 / sampleRate * 1e12 * 16).toLong) // sleep for 16 sample periods
+        sleep((1.0 / 48000 * 1e12 * 16).toLong) // sleep for 16 sample periods
       }
     }
 
