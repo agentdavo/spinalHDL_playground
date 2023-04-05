@@ -1,33 +1,41 @@
 import spinal.core._
-import spinal.core.sim._
 import spinal.lib._
-import spinal.lib.sim._
 
+import spinal.core.sim._
+import spinal.lib.sim._
 
 
 
 // MultiFeedbackDeltaSigmaModulator
 // a multi-feedback topology delta-sigma modulator with multiple feedback loops to shape the noise in the quantization error.
 
-class MultiFeedbackDeltaSigmaModulator(order: Int, inputWidth: Int, outputWidth: Int, osr: Int, input: Bits) extends Component {
-  val output = out(SInt(outputWidth bits))
-  val quantizationError = out(Reg(SInt(inputWidth bits)) init(0))
-
-  val integrators = List.fill(order)(Reg(SInt(outputWidth bits)) init(0))
-  val feedbacks = List.fill(order)(Reg(SInt(outputWidth bits)) init(0))
-
-  val feedbackSum = feedbacks.reduce(_ + _)
-  val integratorSum = integrators.reduce(_ + _)
-  val error = input - feedbackSum - integratorSum.resized
-
-  quantizationError := error
-  output := integratorSum.resized
-
-  for (i <- 0 until order) {
-    integrators(i) := (integrators(i) + error) >> 1
-    feedbacks(i) := (feedbacks(i) + integrators(i)) >> 1
+class MultiFeedbackDeltaSigmaModulator(inputWidth: Int, outputWidth: Int, osr: Int) extends Component {
+  val io = new Bundle {
+    val input = in SInt(inputWidth bits)
+    val output = out SInt(outputWidth bits)
   }
+
+  // Integrator with a configurable feedback gain
+  def integratorWithFeedbackGain(input: SInt, feedbackGain: SInt, outputWidth: Int): (SInt, SInt) = {
+    val integrator = Reg(SInt(outputWidth bits)) init(0)
+    val feedback = Reg(SInt(outputWidth bits)) init(0)
+    val error = input - feedback
+    integrator := (integrator + error) >> 1
+    feedback := (feedback + (integrator * feedbackGain)) >> 1
+    (integrator, feedback)
+  }
+
+  // Multi-feedback topology delta-sigma modulator
+  val (integrator1, feedback1) = integratorWithFeedbackGain(io.input, SInt(osr, outputWidth bits), outputWidth)
+  val (integrator2, feedback2) = integratorWithFeedbackGain(io.input, SInt(osr / 2, outputWidth bits), outputWidth)
+  val (integrator3, feedback3) = integratorWithFeedbackGain(io.input, SInt(osr / 3, outputWidth bits), outputWidth)
+
+  io.output := integrator1 + integrator2 + integrator3
 }
+
+
+
+
 
 // SingleBitQuantizer
 // a simple algorithm that takes a real-valued input signal and outputs a single-bit signal, based on whether the input is 
@@ -50,20 +58,24 @@ object SingleBitQuantizer {
 // to the audio signal before quantization. This results in a reduced noise floor at lower frequencies and an 
 // increased noise floor at higher frequencies, which is less perceptually significant to human ears.
 
-class DigitalNoiseShaperFilter(input: SInt, order: Int) extends Component {
-  val output = out(SInt(input.getWidth bits))
+class DigitalNoiseShaperFilter(inputWidth: Int, order: Int) extends Component {
+	
+  val io = new Bundle {
+    val input = in(SInt(inputWidth bits))
+    val output = out(SInt(inputWidth bits))
+  }
 
-  val delayLine = List.fill(order)(Reg(SInt(input.getWidth bits)) init(0))
-  val taps = List.fill(order)(Reg(SInt(input.getWidth bits)) init(0))
+  val delayLine = List.fill(order)(Reg(SInt(inputWidth bits)) init(0))
+  val taps = List.fill(order)(Reg(SInt(inputWidth bits)) init(0))
   val sum = taps.reduce(_ + _)
-  val quantizationError = input - sum
+  val quantizationError = io.input - sum
 
-  output := delayLine.head.resized + quantizationError
+  io.output := delayLine.head.resized + quantizationError
   for (i <- 0 until order - 1) {
     taps(i) := delayLine(i) - delayLine(i + 1)
   }
   taps.last := quantizationError
-  delayLine.head := output
+  delayLine.head := io.output
   for (i <- 1 until order) {
     delayLine(i) := delayLine(i - 1)
   }
@@ -79,8 +91,12 @@ class DigitalNoiseShaperFilter(input: SInt, order: Int) extends Component {
 // The pulse density scaling is performed by counting the number of 1s in a sliding window of the PDM signal and 
 // adjusting the output pulse density accordingly.
 
-class PulseDensityScaler(input: Bool, osr: Int, pdmFrequency: HertzNumber) extends Component {
-  val output = out(Bool)
+class PulseDensityScaler(osr: Int, pdmFrequency: HertzNumber) extends Component {
+  val io = new Bundle {
+    val input = in Bool
+    val output = out Bool
+  }
+
   val pulseCounter = Reg(UInt(log2Up(osr) bits)) init(0)
   val increment = Reg(UInt(log2Up(osr) bits)) init(0)
 
@@ -92,7 +108,7 @@ class PulseDensityScaler(input: Bool, osr: Int, pdmFrequency: HertzNumber) exten
   }
 
   pulseCounter := pulseCounter + increment
-  output := pulseCounter < increment
+  io.output := pulseCounter < increment
 
   val clockDivider = new ClockDivider {
     val io = new Bundle {
@@ -102,7 +118,7 @@ class PulseDensityScaler(input: Bool, osr: Int, pdmFrequency: HertzNumber) exten
     io.output := io.input
   }
 
-  clockDivider.io.input := output
+  clockDivider.io.input := io.output
   clockDivider.setConfig(ClockDomainConfig(resetKind = SYNC, resetActiveLevel = LOW, clockEdge = RISING))
 
   // By subtracting the jitter from the pulse width, the pulse is made slightly narrower to compensate for the 
@@ -117,31 +133,50 @@ class PulseDensityScaler(input: Bool, osr: Int, pdmFrequency: HertzNumber) exten
 
 
 
-class PdmModulator(
-  pdmClockFrequency: HertzNumber,
-  conversionClockFrequency: HertzNumber,
-  pcmFrequency: HertzNumber
-) extends Component {
+
+class PdmModulator(pcmFrequency: HertzNumber,
+		   dsmFrequency: HertzNumber,
+	           pdmOuptutFrequency: HertzNumber,
+                   inputWidth: Int) extends Component {
+	
   val io = new Bundle {
-    val pcmInput = in Bits(24 bits)
+    val pcmInput = in Bits(inputWidth bits)
     val pdmOutput = out Bool
   }
 
-  val osr = conversionClockFrequency / pcmFrequency
-  val modulator = new MultiFeedbackDeltaSigmaModulator(3, 1, 3, osr.toInt, io.pcmInput)
-  val quantizedOutput = new SingleBitQuantizer(modulator.output, 1)
-  val noiseShaper = new DigitalNoiseShaperFilter(modulator.quantizationError, 1)
-  val shapedOutput = noiseShaper.output(0) ^ quantizedOutput ^ noiseShaper.output(1)
-  val pulseDensityScaler = new PulseDensityScaler(shapedOutput, osr.toInt, pdmClockFrequency)
+  val dsmOsr = dsmFrequency / pcmFrequency
+  val pdmOsr = pdmOuptutFrequency / dsmFrequency
 
+  // upsample input to dsmFrequency
+  val modulator = new MultiFeedbackDeltaSigmaModulator(inputWidth, inputWidth, dsmOsr)
+  modulator.io.input := io.input
+
+  // quantize to single bits
+  val quantizedOutput = new SingleBitQuantizer(modulator.io.output, 1)
+
+  // quantize to single bits
+  val noiseShaper = new DigitalNoiseShaperFilter(inputWidth, 1)
+  noiseShaper.io.input := modulator.io.quantizationError
+
+  // quantize to single bits
+  val shapedOutput = noiseShaper.output ^ quantizedOutput
+
+  // downsample shapedOutput to pdmOuptutFrequency
+  val pulseDensityScaler = new PulseDensityScaler(pdmOsr, pdmOuptutFrequency)
+  pulseDensityScaler.io.input :=
+	
   io.pdmOutput := pulseDensityScaler.output
+	
 }
+
+
 
 
 // This test uses an external clock domain that is synchronized to the PDM output of the DUT.
 // It generates a multi-tone signal with three frequencies and applies it to the PCM input of the PDM modulator.
 // The output PDM signal is buffered using a BufferedOutPort and compared to the reference implementation.
 // The test then calculates and prints the SNR and THD of the PDM output.
+
 
 object PdmModulatorTestbench extends App {
   // Define test parameters
