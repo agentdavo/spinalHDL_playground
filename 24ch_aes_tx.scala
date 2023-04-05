@@ -92,6 +92,14 @@ object AES_audio_tx_tb extends App {
       dut.clockDomain.forkStimulus(2)
     }
 
+    val spdifClockThread = fork {
+      dut.io.spdif_clock #= true
+      while (true) {
+        dut.io.spdif_clock #= !dut.io.spdif_clock.toBoolean
+        sleep(1)
+      }
+    }
+
     val audioInDriver = fork {
       dut.io.numChannels #= log2Up(24) // Set the number of channels (log2Up multiples of 2)
       dut.io.sampleRate #= Hz_48000    // Set the sample rate
@@ -140,6 +148,7 @@ object AES_audio_tx_tb extends App {
     }
 
     clockThread.join()
+    spdifClockThread.join()
     audioInDriver.join()
     aesOutMonitor.join()
   }
