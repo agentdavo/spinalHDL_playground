@@ -5,39 +5,49 @@ import spinal.sim._
 
 import scala.util.Random
 
+object SampleRate extends SpinalEnum {
+  val Hz_44100, Hz_48000, Hz_96000 = newElement()
+}
 
-
-
-case class AES_audio_tx(numChannels: Int = 24) extends Component {
+case class AES_audio_tx() extends Component {
+  
+  import SampleRate._
+  
   val io = new Bundle {
-    val audioIn = in Stream(Vec(Bits(24 bits), numChannels))
+    val numChannels = in UInt(log2Up(24) bits) // Number of channels as input
+    val sampleRate = in(SampleRate())          // Sample rate as input
+    val audioIn = in Stream(Vec(Bits(24 bits), 1 << io.numChannels))
     val aesOut = out Stream Bool
   }
   
-  val sampleRate = 48000 Hz
-  val bmcTable = List(
-    "10".b, "11".b, "001".b, "0001".b, "00001".b, "000001".b, "0000001".b, "00000001".b
-  )
-
   // Generate the preamble and syncword
   val preamble = "0" * 196
   val syncword = "11111111111110".b
 
   // Generate the channel status word
   val channelStatus = Bits(10 bits)
-  channelStatus(0, 3) := "0011".b // Professional use
-  channelStatus(3, 5) := (numChannels - 1).asBits.resize(2)
-  channelStatus(5, 7) := "11".b // Sample rate 48kHz
-  channelStatus(7) := True // Audio word length = 24 bits
+  channelStatus(0, 3) := "0011".b      // Professional use
+  channelStatus(3, 5) := (1 << io.numChannels - 1).asBits.resize(2)
+  channelStatus(7) := True             // Audio word length = 24 bits
   channelStatus(8, 10) := "10".b // No emphasis
-
+  switch(io.sampleRate) {
+    is(Hz_44100) {
+      channelStatus(5, 7) := "01".b    // Sample rate 44.1kHz
+    }
+    is(Hz_48000) {
+      channelStatus(5, 7) := "11".b    // Sample rate 48kHz
+    }
+    is(Hz_96000) {
+    channelStatus(5, 7) := "10".b      // Sample rate 96kHz
+    }
+  }
+  
   // BMC encoder
   val bmc = new Area {
+    val bmcTable = List( "10".b, "11".b, "001".b, "0001".b, "00001".b, "000001".b, "0000001".b, "00000001".b )
     val state = RegInit(False)
-
     io.aesOut.valid := False
     io.aesOut.payload := False
-
     when(io.audioIn.valid) {
       val channelBits = io.audioIn.payload.flatMap(_.resized)
       val subframes = channelBits.subdivideIn(192 bits)
@@ -50,6 +60,7 @@ case class AES_audio_tx(numChannels: Int = 24) extends Component {
       io.aesOut.payload := preamble ## channelStatus ## words.toBits ## syncword
     }
   }
+  
 }
 
 
