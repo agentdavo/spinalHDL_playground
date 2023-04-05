@@ -3,143 +3,286 @@ import javax.sound.sampled._
 
 import spinal.core._
 import spinal.core.sim._
-import scala.collection.mutable.ArrayBuffer
+import spinal.lib.pipeline.{Pipeline, Stage, Connection}
 import scala.math._
 
+import scala.collection.mutable.ArrayBuffer
 
-  // Define the coefficients for the Lagrange interpolator
-  // 6-point, 5th-order optimal 4x z-form implementation
-  // 149dB SNR 
-  // See "Polynomial Interpolators for High-Quality Resampling of Oversampled Audio" by Olli Niemitalo
+// Define the coefficients for the Lagrange interpolator
+// 6-point, 5th-order optimal 4x z-form implementation
+// 149dB SNR
+// See "Polynomial Interpolators for High-Quality Resampling of Oversampled Audio" by Olli Niemitalo
 
-object LagrangeInterpolationOptimalZForm4x6pt5thOrder {
-  
-  val coefficients = Seq[Double](
-    0.07571827673995030, -0.87079480370960549, 0.186883718356452901, 1.09174419992174300, 0.03401038103941584,
-    0.39809419102537769, 0.41706012247048818, -0.40535151498252686, -0.62917625718809478, -0.05090907029392906,
-    0.02618753167558019, 0.12392296259397995, 0.21846781431808182, 0.15915674384870970, 0.01689861603514873
+object LagIntOpt {
+  val coeffs = Seq[SFix](
+    SFix(0.07571827673995030, 4 exp),
+    SFix(-0.87079480370960549, 4 exp),
+    SFix(0.186883718356452901, 4 exp),
+    SFix(1.09174419992174300, 4 exp),
+    SFix(0.03401038103941584, 4 exp),
+    SFix(0.39809419102537769, 4 exp),
+    SFix(0.41706012247048818, 4 exp),
+    SFix(-0.40535151498252686, 4 exp),
+    SFix(-0.62917625718809478, 4 exp),
+    SFix(-0.05090907029392906, 4 exp),
+    SFix(0.02618753167558019, 4 exp),
+    SFix(0.12392296259397995, 4 exp),
+    SFix(0.21846781431808182, 4 exp),
+    SFix(0.15915674384870970, 4 exp),
+    SFix(0.01689861603514873, 4 exp)
   )
-
-  def interpolate(x: Double, y: Seq[Double]): Double = {
-    val even1 = y(1) + y(0)
-    val odd1 = y(1) - y(0)
-    val even2 = y(2) + y(1)
-    val odd2 = y(2) - y(1)
-    val even3 = y(3) + y(2)
-    val odd3 = y(3) - y(2)
-    val even4 = y(4) + y(3)
-    val odd4 = y(4) - y(3)
-    val even5 = y(5) + y(4)
-    val odd5 = y(5) - y(4)
-
-    val c0 = even1 * coefficients(0) + even2 * coefficients(1) + even3 * coefficients(2)
-    val c1 = odd1 * coefficients(3) + odd2 * coefficients(4) + odd3 * coefficients(5)
-    val c2 = even1 * coefficients(6) + even2 * coefficients(7) + even3 * coefficients(8)
-    val c3 = odd1 * coefficients(9) + odd2 * coefficients(10) + odd3 * coefficients(11)
-    val c4 = even1 * coefficients(12) + even2 * coefficients(13) + even3 * coefficients(14)
-    val c5 = odd1 * coefficients(15) + odd2 * coefficients(16) + odd3 * coefficients(17)
-
-    (((((c5 * (x - 2.5) + c4) * (x - 1.5) + c3) * (x - 0.5) + c2) * (x + 0.5) + c1) * (x + 1.5) + c0) * (x + 2.5)
-  }
 }
 
+class Interpolator extends Component {
+  val io = new Bundle {
+    val x = in SFix (4 exp, 32 bits)
+    val y = in Vec (SFix(4 exp, 32 bits), 6)
+    val result = out SFix (4 exp, 32 bits)
+  }
 
+  val pipeline = Pipeline(
+    List(
+      new StageEO,
+      new StageCoeff,
+      new StageMult,
+      new StageAddSub,
+      new StageFinalAdd
+    )
+  )
 
+  pipeline.input(0) := io.x
+  pipeline.input(1) := io.y
+  io.result := pipeline.output(0)
+
+  class StageEO extends Stage {
+    val x = input(SFix(4 exp, 32 bits))
+    val y = input(Vec(SFix(4 exp, 32 bits), 6))
+
+    val e1, o1, e2, o2, e3, o3, e4, o4, e5, o5 = SFix(4 exp, 32 bits)
+
+    e1 := y(1) + y(0)
+    o1 := y(1) - y(0)
+    e2 := y(2) + y(1)
+    o2 := y(2) - y(1)
+    e3 := y(3) + y(2)
+    o3 := y(3) - y(2)
+    e4 := y(4) + y(3)
+    o4 := y(4) - y(3)
+    e5 := y(5) + y(4)
+    o5 := y(5) - y(4)
+
+    output(e1)
+    output(o1)
+    output(e2)
+    output(o2)
+    output(e3)
+    output(o3)
+    output(e4)
+    output(o4)
+    output(e5)
+    output(o5)
+    output(x)
+  }
+
+  class StageCoeff extends Stage {
+    val eo = input(Vec(SFix(4 exp, 32 bits), 10))
+
+    val c = Vec(SFix(4 exp, 32 bits), 6)
+
+    for (i <- 0 until 6) {
+      c(i) := eo(i * 2) * LagIntOpt.coeffs(i * 3) +
+        eo(i * 2 + 1) * LagIntOpt.coeffs(i * 3 + 1) +
+        eo(i * 2 + 2) * LagIntOpt.coeffs(i * 3 + 2)
+    }
+
+    output(c)
+    output(input(SFix(4 exp, 32 bits))) // Pass through x
+  }
+
+  class StageMult extends Stage {
+    // Input and output vectors
+    val inVec = input(Vec(SFix(4 exp, 32 bits), 6))
+    val outVec = Vec(SFix(4 exp, 32 bits), 6)
+
+    // Perform multiplications
+    outVec(0) := inVec(0)
+    outVec(1) := inVec(1) * (input(SFix(4 exp, 32 bits)) + SFix(1.5, 4 exp))
+    outVec(2) := inVec(2) * (input(SFix(4 exp, 32 bits)) + SFix(0.5, 4 exp))
+    outVec(3) := inVec(3) * (input(SFix(4 exp, 32 bits)) - SFix(0.5, 4 exp))
+    outVec(4) := inVec(4) * (input(SFix(4 exp, 32 bits)) - SFix(1.5, 4 exp))
+    outVec(5) := inVec(5) * (input(SFix(4 exp, 32 bits)) - SFix(2.5, 4 exp))
+
+    output(outVec)
+  }
+
+  class StageAddSub extends Stage {
+    // Input and output vectors
+    val inVec = input(Vec(SFix(4 exp, 32 bits), 6))
+    val outVec = Vec(SFix(4 exp, 32 bits), 3)
+
+    // Perform additions and subtractions
+    outVec(0) := inVec(5) + inVec(4)
+    outVec(1) := inVec(3) + inVec(2)
+    outVec(2) := inVec(1) + inVec(0)
+
+    output(outVec)
+  }
+
+  class StageFinalAdd extends Stage {
+    // Input vector
+    val inVec = input(Vec(SFix(4 exp, 32 bits), 3))
+
+    // Calculate the final result
+    val result = inVec(2) + inVec(1) + inVec(0)
+
+    output(result)
+  }
+
+}
 
 case class OversamplingFIRConfig(
-  inputWidth: Int = 24,
-  outputWidth: Int = 24,
-  shiftRegisterSize: Int = 6
+    inputWidth: Int = 24,
+    outputWidth: Int = 24,
+    shiftRegisterSize: Int = 6
 )
-
-
-
 
 class OversamplingFIR(config: OversamplingFIRConfig) extends Component {
   val io = new Bundle {
-    val pcmInput = in Bits(config.inputWidth bits)
-    val pcmOutput = out Bits(config.outputWidth bits)
+    val inputStream = slave Stream (Bits(config.inputWidth bits))
+    val outputStream = master Stream (Bits(config.outputWidth bits))
   }
 
-  val outputStream = Stream(Fragment(Bits(config.inputWidth bits)))
-  val outputOversampledRatio = 4
+  // Circular buffer implementation
+  val buffer = Mem(Bits(config.inputWidth bits), config.shiftRegisterSize)
+  val bufferWritePtr = Counter(buffer.size)
+  val bufferReadPtrs = List.tabulate(6)(i => bufferWritePtr - i)
 
-  outputStream.valid := Delay(io.pcmInput, config.shiftRegisterSize - 1).willBeRemoved()
-  outputStream.payload := Delay(io.pcmInput, config.shiftRegisterSize - 1)
-
-  val shiftRegister = RegInit(Bits(config.inputWidth bits), 0)
-  shiftRegister := io.pcmInput ## shiftRegister(config.inputWidth - 1 downto 1)
-
-  val input = io.inputStream.payload
-
-  val interpolatedValue = LagrangeInterpolationOptimalZForm4x6pt5thOrder.interpolate(2.0, Seq(
-    shiftRegister((config.shiftRegisterSize - 1)),
-    shiftRegister((config.shiftRegisterSize - 1) - 1),
-    shiftRegister((config.shiftRegisterSize - 1) - 2),
-    shiftRegister((config.shiftRegisterSize - 1) - 3),
-    shiftRegister((config.shiftRegisterSize - 1) - 4),
-    shiftRegister((config.shiftRegisterSize - 1) - 5)
-  ))
-
-  when(outputStream.fire) {
-    io.pcmOutput := interpolatedValue.resized
+  // Write input to buffer
+  when(io.inputStream.fire) {
+    buffer(bufferWritePtr) := io.inputStream.payload
+    bufferWritePtr.increment()
   }
+
+  // Instantiate Interpolator
+  val interpolator = new Interpolator
+  interpolator.io.x := SFix(
+    2.0,
+    4 exp
+  ) // You can replace this with a configurable value
+  for (i <- 0 until 6) {
+    interpolator.io
+      .y(i) := SFix.fromBits(buffer(bufferReadPtrs(i)), 4 exp, 32 bits)
+  }
+
+  // Connect input and output streams
+  io.inputStream.ready := True
+  io.outputStream.valid := io.inputStream.valid
+  io.outputStream.payload := interpolator.io.result.toBits.resized(config.outputWidth bits)
 }
-
-
-
 
 object OversamplingFIRSim {
   def main(args: Array[String]): Unit = {
     val simConfig = SimConfig.withWave
-    simConfig.compile(new OversamplingFIR(OversamplingFIRConfig())).doSim { dut =>
-      val sampleRate = 96000
-      val numSamples = 1000
-      val numTones = 32
-      val minFreq = 16.0
-      val maxFreq = 20000.0
+    simConfig.compile(new OversamplingFIR(OversamplingFIRConfig())).doSim {
+      dut =>
+        val sampleRate = 96000
+        val numSamples = 1000
+        val numTones = 32
+        val minFreq = 16.0
+        val maxFreq = 20000.0
 
-      // Generate the 32-tone input signal
-      def generateToneSignal(freq: Double, sampleRate: Double, numSamples: Int, scalingFactor: Double): Seq[Long] = {
-        val omega = 2 * Pi * freq / sampleRate
-        (0 until numSamples).map { n => (sin(omega * n) * ((1 << (dut.config.inputWidth - 1)) - 1) * scalingFactor).toLong }
-      }
-
-      val freqs = Array.tabulate(numTones) { i =>
-        minFreq * pow(maxFreq / minFreq, i.toDouble / (numTones - 1))
-      }
-
-      // Calculate the scaling factor for 1 dB less than the max amplitude
-      val scalingFactor = pow(10, -1 / 20.0)
-
-      val inputSignal = freqs.map(freq => generateToneSignal(freq, sampleRate, numSamples, scalingFactor)).reduce(_ zip _ map { case (x, y) => x + y })
-
-      // Save the input signal to a WAV file
-      val inputBytes = inputSignal.flatMap(_.toBinaryString.reverse.padTo(dut.config.inputWidth, '0')).grouped(8).map(x => Integer.parseInt(x.reverse, 2).toByte).toArray
-      val inputOut = new ByteArrayOutputStream()
-      val inputFormat = new AudioFormat(sampleRate.toFloat, dut.config.inputWidth, 1, true, false)
-      val inputInputStream = new AudioInputStream(new ByteArrayInputStream(inputBytes), inputFormat, inputBytes.length / (dut.config.inputWidth / 8))
-      AudioSystem.write(inputInputStream, AudioFileFormat.Type.WAVE, new File("input_signal.wav"))
-
-      // Process the input signal through the OversamplingFIR
-      val outputSignal = ArrayBuffer[Long]()
-      for (n <- 0 until numSamples) {
-        dut.io.pcmInput #= inputSignal(n)
-        dut.clockDomain.waitSampling(dut.config.outputOversampledRatio)
-
-        if (n % dut.config.outputOversampledRatio == 0) {
-          outputSignal += dut.io.pcmOutput.toLong
+        // Generate the 32-tone input signal
+        def generateToneSignal(
+            freq: Double,
+            sampleRate: Double,
+            numSamples: Int,
+            scalingFactor: Double
+        ): Seq[Long] = {
+          val omega = 2 * Pi * freq / sampleRate
+          (0 until numSamples).map { n =>
+            (sin(
+              omega * n
+            ) * ((1 << (dut.config.inputWidth - 1)) - 1) * scalingFactor).toLong
+          }
         }
-      }
 
-      // Save the output signal to a WAV file
-      val outputBytes = outputSignal.flatMap(_.toBinaryString.reverse.padTo(dut.config.outputWidth, '0')).grouped(8).map(x => Integer.parseInt(x.reverse, 2).toByte).toArray
-      val outputOut = new ByteArrayOutputStream()
-      val outputFormat = new AudioFormat(sampleRate.toFloat * dut.config.outputOversampledRatio, dut.config.outputWidth, 1, true, false)
-      val outputInputStream = new AudioInputStream(new ByteArrayInputStream(outputBytes), outputFormat, outputBytes.length / (dut.config.outputWidth / 8))
-      AudioSystem.write(outputInputStream, AudioFileFormat.Type.WAVE, new File("output_signal.wav"))
+        val freqs = Array.tabulate(numTones) { i =>
+          minFreq * pow(maxFreq / minFreq, i.toDouble / (numTones - 1))
+        }
 
-      println("Input and output signals saved to input_signal.wav and output_signal.wav")
+        // Calculate the scaling factor for 1 dB less than the max amplitude
+        val scalingFactor = pow(10, -1 / 20.0)
+
+        val inputSignal = freqs
+          .map(freq =>
+            generateToneSignal(freq, sampleRate, numSamples, scalingFactor)
+          )
+          .reduce(_ zip _ map { case (x, y) => x + y })
+
+        // Save the input signal to a WAV file
+        val inputBytes = inputSignal
+          .flatMap(_.toBinaryString.reverse.padTo(dut.config.inputWidth, '0'))
+          .grouped(8)
+          .map(x => Integer.parseInt(x.reverse, 2).toByte)
+          .toArray
+        val inputOut = new ByteArrayOutputStream()
+        val inputFormat = new AudioFormat(
+          sampleRate.toFloat,
+          dut.config.inputWidth,
+          1,
+          true,
+          false
+        )
+        val inputInputStream = new AudioInputStream(
+          new ByteArrayInputStream(inputBytes),
+          inputFormat,
+          inputBytes.length / (dut.config.inputWidth / 8)
+        )
+        AudioSystem.write(
+          inputInputStream,
+          AudioFileFormat.Type.WAVE,
+          new File("input_signal.wav")
+        )
+
+        // Process the input signal through the OversamplingFIR
+        val outputSignal = ArrayBuffer[Long]()
+        for (n <- 0 until numSamples) {
+          dut.io.pcmInput #= inputSignal(n)
+          dut.clockDomain.waitSampling(dut.config.outputOversampledRatio)
+
+          if (n % dut.config.outputOversampledRatio == 0) {
+            outputSignal += dut.io.pcmOutput.toLong
+          }
+        }
+
+        // Save the output signal to a WAV file
+        val outputBytes = outputSignal
+          .flatMap(_.toBinaryString.reverse.padTo(dut.config.outputWidth, '0'))
+          .grouped(8)
+          .map(x => Integer.parseInt(x.reverse, 2).toByte)
+          .toArray
+        val outputOut = new ByteArrayOutputStream()
+        val outputFormat = new AudioFormat(
+          sampleRate.toFloat * dut.config.outputOversampledRatio,
+          dut.config.outputWidth,
+          1,
+          true,
+          false
+        )
+        val outputInputStream = new AudioInputStream(
+          new ByteArrayInputStream(outputBytes),
+          outputFormat,
+          outputBytes.length / (dut.config.outputWidth / 8)
+        )
+        AudioSystem.write(
+          outputInputStream,
+          AudioFileFormat.Type.WAVE,
+          new File("output_signal.wav")
+        )
+
+        println(
+          "Input and output signals saved to input_signal.wav and output_signal.wav"
+        )
     }
   }
 }
