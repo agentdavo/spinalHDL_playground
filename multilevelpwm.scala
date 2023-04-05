@@ -54,33 +54,35 @@ case class MultilevelOutputConfig(
 
 
 
-case class PWMOutput(resolution: BitCount, polarity: Bool) extends Component {
+case class PWMOutput(resolution: BitCount, polarity: Bool, deadtime: UInt) extends Component {
   val io = new Bundle {
-    val dutyCycle = in UInt(resolution)  // duty cycle of the PWM signal
-    val output = out Bool  // modulated output signal
+    val dutyCycle = in UInt(resolution)
+    val output = out Bool
   }
 
-  // counter to generate the PWM signal
+  // Counter that increments with each clock cycle
   val counter = Counter(resolution)
-  // threshold register to control the duty cycle of the PWM signal
+  
+  // Threshold value to determine the duty cycle of the PWM output
   val threshold = Reg(UInt(resolution)) init(0)
 
-  // set the output signal based on the polarity and the comparison between the counter and the threshold
+  // Output PWM signal based on the polarity setting
   when(polarity) {
     io.output := counter < threshold
   } otherwise {
     io.output := counter >= threshold
   }
 
-  // increment the counter
+  // Increment the counter
   counter.increment()
 
-  // clear the counter when it reaches its maximum value
+  // If the counter overflows, clear it and add the deadtime to the threshold value
   when(counter.willOverflow) {
     counter.clearAll()
+    threshold := threshold + deadtime
   }
 
-  // set the threshold based on the duty cycle input
+  // Update the threshold value with the duty cycle input
   threshold := io.dutyCycle
 }
 
@@ -111,17 +113,17 @@ case class MultilevelOutput(inputWidth: BitCount, resolution: BitCount, levels: 
     val output = out Bool  // modulated output signal
   }
 
-  // create a list of PWMOutput instances with positive polarity
+  // create a list of PWMOutput instances with positive polarity and 1 cycle deadtime
   val pwmOutputsPos = List.tabulate(levels) { i =>
-    val pwm = PWMOutput(resolution, True)
+    val pwm = PWMOutput(resolution, true, 1)
     // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
   }
 
-  // create a list of PWMOutput instances with negative polarity
+  // create a list of PWMOutput instances with negative polarity and 1 cycle deadtime
   val pwmOutputsNeg = List.tabulate(levels) { i =>
-    val pwm = PWMOutput(resolution, False)
+    val pwm = PWMOutput(resolution, false, 1)
     // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
