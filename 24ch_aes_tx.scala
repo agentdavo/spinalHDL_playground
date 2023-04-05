@@ -18,6 +18,7 @@ case class AES_audio_tx() extends Component {
     val sampleRate = in(SampleRate())          // Sample rate as input
     val audioIn = in Stream(Vec(Bits(24 bits), 1 << io.numChannels))
     val aesOut = out Stream Bool
+    val spdif_clock = in Bool
   }
   
   // Generate the preamble and syncword
@@ -41,13 +42,15 @@ case class AES_audio_tx() extends Component {
     channelStatus(5, 7) := "10".b      // Sample rate 96kHz
     }
   }
+
+  // BMC encoder in the spdif clock domain
   
-  // BMC encoder
-  val bmc = new Area {
-    val bmcTable = List( "10".b, "11".b, "001".b, "0001".b, "00001".b, "000001".b, "0000001".b, "00000001".b )
+  val bmc = new ClockingArea(spdifClockDomain) {
     val state = RegInit(False)
+    val bmcTable = List( "10".b, "11".b, "001".b, "0001".b, "00001".b, "000001".b, "0000001".b, "00000001".b )
     io.aesOut.valid := False
     io.aesOut.payload := False
+
     when(io.audioIn.valid) {
       val channelBits = io.audioIn.payload.flatMap(_.resized)
       val subframes = channelBits.subdivideIn(192 bits)
@@ -57,7 +60,7 @@ case class AES_audio_tx() extends Component {
         B(encoded.dropRight(1).asBits, 2 bits)
       }
       io.aesOut.valid := True
-      io.aesOut.payload := preamble ## channelStatus ## words.toBits ## syncword
+      io.aesOut.payload := preamble ## channelStatus(io.sampleRate, io.numChannels) ## words.toBits ## syncword
     }
   }
   
