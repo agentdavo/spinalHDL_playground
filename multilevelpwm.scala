@@ -40,6 +40,8 @@ import spinal.lib._
 // These parameters can be adjusted as needed depending on the specific requirements and constraints of the application.
 
 
+
+
 case class MultilevelOutputConfig(
   inputWidth: BitCount = 24 bits,
   resolution: BitCount = 8 bits,
@@ -50,75 +52,105 @@ case class MultilevelOutputConfig(
 )
 
 
+
+
 case class PWMOutput(resolution: BitCount, polarity: Bool) extends Component {
   val io = new Bundle {
-    val dutyCycle = in UInt(resolution)
-    val output = out Bool
+    val dutyCycle = in UInt(resolution)  // duty cycle of the PWM signal
+    val output = out Bool  // modulated output signal
   }
 
+  // counter to generate the PWM signal
   val counter = Counter(resolution)
+  // threshold register to control the duty cycle of the PWM signal
   val threshold = Reg(UInt(resolution)) init(0)
 
+  // set the output signal based on the polarity and the comparison between the counter and the threshold
   when(polarity) {
     io.output := counter < threshold
   } otherwise {
     io.output := counter >= threshold
   }
 
+  // increment the counter
   counter.increment()
 
+  // clear the counter when it reaches its maximum value
   when(counter.willOverflow) {
     counter.clearAll()
   }
 
+  // set the threshold based on the duty cycle input
   threshold := io.dutyCycle
 }
 
 
+
+
 case class PFMOutput(inputWidth: BitCount, thresholdWidth: BitCount, step: UInt) extends Component {
   val io = new Bundle {
-    val input = in UInt inputWidth
-    val output = out Bool
+    val input = in UInt inputWidth  // input signal
+    val output = out Bool  // modulated output signal
   }
 
+  // comparator register to compare the input signal with a threshold
   val comparator = Reg(UInt(thresholdWidth)) init(0)
 
+  // set the output signal based on the comparison result
   io.output := io.input > comparator
+  // increment the comparator threshold
   comparator := comparator + step
 }
 
 
+
+
 case class MultilevelOutput(inputWidth: BitCount, resolution: BitCount, levels: Int, thresholdWidth: BitCount, step: UInt, shift: Int) extends Component {
   val io = new Bundle {
-    val input = in SInt inputWidth
-    val output = out Bool
+    val input = in SInt inputWidth  // input signal
+    val output = out Bool  // modulated output signal
   }
 
+  // create a list of PWMOutput instances with positive polarity
   val pwmOutputsPos = List.tabulate(levels) { i =>
     val pwm = PWMOutput(resolution, True)
+    // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
   }
 
+  // create a list of PWMOutput instances with negative polarity
   val pwmOutputsNeg = List.tabulate(levels) { i =>
     val pwm = PWMOutput(resolution, False)
+    // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
   }
 
+  // create a list of PFMOutput instances
   val pfmOutputs = List.tabulate(levels) { i =>
     val pfm = PFMOutput(inputWidth, thresholdWidth, step)
+    // set the input to each PFM instance
     pfm.io.input := io.input.abs()
     pfm
   }
 
+  // create a list of outputs for each level
   val levelOutputs = pwmOutputsPos.zip(pwmOutputsNeg).zip(pfmOutputs).map { case ((pwmPos, pwmNeg), pfm) =>
+    
+    // calculate the difference between the positive and negative PWM outputs
     val pwmDiff = pwmPos.io.output.asSInt - pwmNeg.io.output.asSInt
+    
+    // determine the output for each level based on the PWM difference and the PFM output
     Mux(pwmDiff < 0, pfm.io.output || pwmPos.io.output, pfm.io.output || pwmNeg.io.output)
+    
   }
 
+  // set the final output of the MultilevelOutput component
   io.output := levelOutputs.reduceLeft(_ || _)
 }
+
+
 
 
 object MultilevelOutput {
