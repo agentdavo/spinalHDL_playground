@@ -48,47 +48,45 @@ case class MultilevelOutputConfig(
   levels: Int = 5,
   thresholdWidth: BitCount = 8 bits,
   step: UInt = 1,
-  shift: Int = 3
+  shift: Int = 3,
+  deadtime: UInt = 1
 )
 
 
 
-
+// Component that implements a PWM output with a specified duty cycle, polarity and deadtime
 case class PWMOutput(resolution: BitCount, polarity: Bool, deadtime: UInt) extends Component {
   val io = new Bundle {
     val dutyCycle = in UInt(resolution)
     val output = out Bool
   }
 
-  // Counter that increments with each clock cycle
   val counter = Counter(resolution)
-  
-  // Threshold value to determine the duty cycle of the PWM output
   val threshold = Reg(UInt(resolution)) init(0)
 
-  // Output PWM signal based on the polarity setting
   when(polarity) {
     io.output := counter < threshold
   } otherwise {
     io.output := counter >= threshold
   }
 
-  // Increment the counter
   counter.increment()
 
-  // If the counter overflows, clear it and add the deadtime to the threshold value
   when(counter.willOverflow) {
     counter.clearAll()
-    threshold := threshold + deadtime
+    // Add deadtime between two cycles
+    counter.increment().clearAll()
+    counter.increment()
   }
-
-  // Update the threshold value with the duty cycle input
-  threshold := io.dutyCycle
+  
+  threshold := io.dutyCycle + deadtime
+  
 }
 
 
 
 
+// Component that implements a PFM output with a specified input, threshold, and step size
 case class PFMOutput(inputWidth: BitCount, thresholdWidth: BitCount, step: UInt) extends Component {
   val io = new Bundle {
     val input = in UInt inputWidth  // input signal
@@ -106,24 +104,24 @@ case class PFMOutput(inputWidth: BitCount, thresholdWidth: BitCount, step: UInt)
 
 
 
-
-case class MultilevelOutput(inputWidth: BitCount, resolution: BitCount, levels: Int, thresholdWidth: BitCount, step: UInt, shift: Int) extends Component {
+// Main component that implements a multilevel output stage for an audio amplifier
+case class MultilevelOutput(inputWidth: BitCount, resolution: BitCount, levels: Int, thresholdWidth: BitCount, step: UInt, shift: Int, deadtime: Int) extends Component {
   val io = new Bundle {
     val input = in SInt inputWidth  // input signal
     val output = out Bool  // modulated output signal
   }
 
-  // create a list of PWMOutput instances with positive polarity and 1 cycle deadtime
+  // create a list of PWMOutput instances with positive polarity and deadtime
   val pwmOutputsPos = List.tabulate(levels) { i =>
-    val pwm = PWMOutput(resolution, true, 1)
+    val pwm = PWMOutput(resolution, true, deadtime)
     // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
   }
 
-  // create a list of PWMOutput instances with negative polarity and 1 cycle deadtime
+  // create a list of PWMOutput instances with negative polarity and deadtime
   val pwmOutputsNeg = List.tabulate(levels) { i =>
-    val pwm = PWMOutput(resolution, false, 1)
+    val pwm = PWMOutput(resolution, false, deadtime)
     // set the duty cycle of each PWM instance
     pwm.io.dutyCycle := (io.input.abs() * (i + 1)) >> shift
     pwm
