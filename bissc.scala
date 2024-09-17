@@ -1,5 +1,6 @@
 import spinal.core._
 import spinal.lib._
+import spinal.sim._
 import spinal.lib.bus.amba3.apb._
 
 // Configuration for BiSS-C slave control
@@ -278,3 +279,97 @@ class CRC6 extends Component {
     ~crc
   }
 }
+
+// Define the clock and reset parameters
+case class TestClockConfig(clkPeriod: TimeNumber = 10 ns)
+
+// Test bench for Apb3BisscSlaveCtrl
+object Apb3BisscSlaveCtrlSim {
+  def main(args: Array[String]): Unit = {
+    SimConfig
+      .withWave
+      .compile(new Apb3BisscSlaveCtrl(BisscSlaveCtrlMemoryMappedConfig(new BisscGenerics(32, 50 MHz))))
+      .doSim { dut =>
+        // Generate clock and reset
+        val clkConfig = TestClockConfig()
+        dut.clockDomain.forkStimulus(period = clkConfig.clkPeriod.toLong)
+
+        // Reset signal
+        dut.io.apb.PRESETn #= false
+        sleep(10) // Hold reset for a while
+        dut.io.apb.PRESETn #= true
+
+        // SPI signals (BiSS-C encoder simulation)
+        dut.io.bissc.miso #= false
+        dut.io.bissc.mosi #= false
+        dut.io.bissc.sck #= false
+
+        // APB3 signals initialization
+        dut.io.apb.PSEL #= false
+        dut.io.apb.PENABLE #= false
+        dut.io.apb.PWRITE #= false
+        dut.io.apb.PADDR #= 0
+        dut.io.apb.PWDATA #= 0
+
+        // Simulation step
+        def apbWrite(address: Int, data: Int): Unit = {
+          dut.io.apb.PSEL #= true
+          dut.io.apb.PADDR #= address
+          dut.io.apb.PWDATA #= data
+          dut.io.apb.PWRITE #= true
+          dut.io.apb.PENABLE #= false
+          sleep(1) // Cycle delay
+          dut.io.apb.PENABLE #= true
+          sleep(1) // Acknowledge
+          dut.io.apb.PSEL #= false
+        }
+
+        def apbRead(address: Int): Int = {
+          dut.io.apb.PSEL #= true
+          dut.io.apb.PADDR #= address
+          dut.io.apb.PWRITE #= false
+          dut.io.apb.PENABLE #= false
+          sleep(1) // Cycle delay
+          dut.io.apb.PENABLE #= true
+          sleep(1) // Acknowledge
+          val readValue = dut.io.apb.PRDATA.toInt
+          dut.io.apb.PSEL #= false
+          readValue
+        }
+
+        // Simulate BiSS-C encoder data transmission (simulate an encoder sending valid data)
+        def sendBisscData(data: BigInt): Unit = {
+          val dataBits = data.toString(2).reverse.padTo(64, '0').reverse // 64-bit data (LSB-first)
+          for (i <- 0 until dataBits.length) {
+            dut.io.bissc.miso #= dataBits(i) == '1'
+            dut.io.bissc.sck #= true
+            sleep(1) // Half clock cycle
+            dut.io.bissc.sck #= false
+            sleep(1) // Half clock cycle
+          }
+        }
+
+        // Send a valid BiSS-C frame (simulate a 32-bit position frame with error, warning, and CRC)
+        val validPosition = BigInt("11000000001111000000011100001111000011111111111111111100000000", 2) // Sample data
+        sendBisscData(validPosition)
+
+        // Read APB3 register for position
+        val position = apbRead(0x00)
+        println(s"Position: $position")
+
+        // Assert that the position matches the expected value
+        assert(position == 0x123456) // Replace with actual expected position value
+
+        // Test for error and warning flags
+        val error = apbRead(0x04)
+        println(s"Error Flag: $error")
+
+        val warning = apbRead(0x08)
+        println(s"Warning Flag: $warning")
+
+        // End simulation
+        simSuccess()
+      }
+  }
+}
+
