@@ -1,94 +1,17 @@
 import spinal.core._
 import spinal.lib._
-import spinal.sim._
 import spinal.lib.bus.amba3.apb._
+
+// Constants and Configurations
+object BisscConstants {
+  val frameOverheadBits = 10 // Start bit, error, warning, CRC
+}
+
+// Generic configuration for BiSS-C controller
+case class BisscGenerics(resolutionBits: Int, maxClockFreq: HertzNumber)
 
 // Configuration for BiSS-C slave control
 case class BisscSlaveCtrlMemoryMappedConfig(ctrlGenerics: BisscGenerics)
-
-// Generic configuration for BiSS-C controller
-class BisscGenerics(val resolutionBits: Int, val maxClockFreq: HertzNumber)
-
-// Define frame overhead bits (start bit, error, warning, CRC)
-val frameOverheadBits = 10
-
-// BiSS-C Slave Controller with APB3 integration
-case class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Component {
-  val io = new Bundle {
-    val apb = slave(Apb3(Apb3BisscSlaveCtrl.getApb3Config)) // APB3 interface
-    val bissc = master(Bissc())                             // BiSS-C SPI interface
-    val interrupt = out Bool()                              // Interrupt for host system
-  }
-
-  // Instantiate BiSS-C control logic
-  val bisscCtrl = new BisscSlaveCtrl(generics.ctrlGenerics)
-  io.bissc <> bisscCtrl.io.spi
-
-  // APB3 slave factory for memory-mapped control and data registers
-  val busCtrl = Apb3SlaveFactory(io.apb)
-
-  // Connect BiSS-C control to APB3 registers
-  val bridge = bisscCtrl.io.driveFrom(busCtrl, 0)(generics)
-  io.interrupt := bridge.interruptCtrl.interrupt
-
-  // Memory-mapped register addresses for position, error, and status flags
-  busCtrl.read(bisscCtrl.io.position, address = 0x00, documentation = "Position data")
-  busCtrl.read(bisscCtrl.io.error, address = 0x04, documentation = "Error status")
-  busCtrl.read(bisscCtrl.io.warning, address = 0x08, documentation = "Warning status")
-  busCtrl.read(bisscCtrl.io.crcError, address = 0x0C, documentation = "CRC Error status")
-
-  // Control registers for reset and start request
-  busCtrl.drive(bisscCtrl.io.reset, address = 0x10, documentation = "Reset control")
-  busCtrl.drive(bisscCtrl.io.startRequest, address = 0x14, documentation = "Start request")
-
-  // Interrupt when data is ready or error occurs
-  busCtrl.createInterrupt(
-    interruptSource = bisscCtrl.io.dataReady || bisscCtrl.io.error || bisscCtrl.io.crcError,
-    address = 0x18,
-    documentation = "Interrupt status"
-  )
-}
-
-// BiSS-C Slave Controller logic
-class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
-  val io = new Bundle {
-    val spi = master(Bissc())               // BiSS-C SPI interface
-    val position = out SInt (generics.resolutionBits bits) // Position data output
-    val error = out Bool()                  // Error flag
-    val warning = out Bool()                // Warning flag
-    val crcError = out Bool()               // CRC error flag
-    val reset = in Bool()                   // Reset control
-    val startRequest = in Bool()            // Start request control
-    val dataReady = out Bool()              // Data ready flag
-  }
-
-  // Instantiate the BiSS-C receiver for protocol management
-  val bissCtrl = new BissCReceiver(generics.maxClockFreq, generics.maxClockFreq, generics.resolutionBits)
-
-  // Connect SPI and status signals
-  io.spi <> bissCtrl.io.bissc
-  io.position := bissCtrl.io.position
-  io.error := bissCtrl.io.errorFlag
-  io.warning := bissCtrl.io.warningFlag
-  io.crcError := bissCtrl.io.crcErrorFlag
-  io.dataReady := bissCtrl.io.newDataReady
-
-  // Handle reset and start request
-  bissCtrl.io.reset := io.reset
-  bissCtrl.io.startRequest := io.startRequest
-}
-
-// Define BiSS-C interface (SPI-like)
-case class Bissc() extends Bundle with IMasterSlave {
-  val sck = Bool()  // Clock signal
-  val miso = Bool() // Master in slave out
-  val mosi = Bool() // Master out slave in
-
-  override def asMaster(): Unit = {
-    out(sck, mosi)
-    in(miso)
-  }
-}
 
 // Configuration for APB3 interface
 object Apb3BisscSlaveCtrl {
@@ -98,276 +21,281 @@ object Apb3BisscSlaveCtrl {
   )
 }
 
-// BiSS-C Receiver logic with ClockingArea
-class BissCReceiver(clkFreq: HertzNumber, maxClockFreq: HertzNumber, defaultResolution: Int = 32) extends Component {
+// BiSS-C Interface Definition
+case class BissCInterface() extends Bundle with IMasterSlave {
+  val ma  = Bool()  // Master Clock (input to slave)
+  val slo = Bool()  // Slave Output (output from slave)
+
+  override def asMaster(): Unit = {
+    in(ma)
+    out(slo)
+  }
+}
+
+// BiSS-C Slave Controller with APB3 Integration
+class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Component {
   val io = new Bundle {
-    val bissc = master(Bissc())
-    val position = out SInt (defaultResolution bits)
-    val errorFlag = out Bool ()
-    val warningFlag = out Bool ()
-    val crcErrorFlag = out Bool ()
-    val reset = in Bool ()
-    val startRequest = in Bool ()
+    val apb = slave(Apb3(Apb3BisscSlaveCtrl.getApb3Config))
+    val bissc = master(BissCInterface())
+    val interrupt = out Bool()
+  }
+
+  // Instantiate BiSS-C Control Logic
+  val bisscCtrl = new BisscSlaveCtrl(generics.ctrlGenerics)
+  io.bissc <> bisscCtrl.io.bissc
+
+  val busCtrl = Apb3SlaveFactory(io.apb)
+
+  // Status Registers (Read-Only)
+  busCtrl.read(bisscCtrl.io.position,      0x00, "Position data")
+  busCtrl.read(bisscCtrl.io.error,         0x04, "Error status")
+  busCtrl.read(bisscCtrl.io.warning,       0x08, "Warning status")
+  busCtrl.read(bisscCtrl.io.crcError,      0x0C, "CRC Error status")
+
+  // Control Registers (Write-Only)
+  busCtrl.drive(bisscCtrl.io.reset,        0x10, "Reset control")
+  busCtrl.drive(bisscCtrl.io.startRequest, 0x14, "Start request")
+
+  // Interrupt Logic
+  val interruptSignal = bisscCtrl.io.dataReady || bisscCtrl.io.error || bisscCtrl.io.crcError
+  io.interrupt := interruptSignal
+  busCtrl.read(interruptSignal,              0x18, "Interrupt status")
+}
+
+// BiSS-C Slave Controller Logic
+class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
+  val io = new Bundle {
+    val bissc = master(BissCInterface())
+    val position = out SInt (generics.resolutionBits bits)
+    val error = out Bool()
+    val warning = out Bool()
+    val crcError = out Bool()
+    val reset = in Bool()
+    val startRequest = in Bool()
+    val dataReady = out Bool()
+  }
+
+  // Instantiate the BiSS-C Receiver
+  val bissReceiver = new BissCReceiver(generics)
+  io.bissc <> bissReceiver.io.bissc
+
+  // Connect Signals
+  io.position     := bissReceiver.io.position
+  io.error        := bissReceiver.io.errorFlag
+  io.warning      := bissReceiver.io.warningFlag
+  io.crcError     := bissReceiver.io.crcErrorFlag
+  io.dataReady    := bissReceiver.io.newDataReady
+
+  // Control Signals
+  bissReceiver.io.reset        := io.reset
+  bissReceiver.io.startRequest := io.startRequest
+}
+
+// BiSS-C Receiver Logic
+class BissCReceiver(generics: BisscGenerics) extends Component {
+  val io = new Bundle {
+    val bissc = master(BissCInterface())
+    val position = out SInt (generics.resolutionBits bits)
+    val errorFlag = out Bool()
+    val warningFlag = out Bool()
+    val crcErrorFlag = out Bool()
+    val reset = in Bool()
+    val startRequest = in Bool()
     val newDataReady = out Bool()
   }
 
-  // Define clocking area to manage clock and state transitions
-  val clockDomain = ClockDomain.current
-  val area = new ClockingArea(clockDomain) {
-    // State machine definition
-    val idle :: request :: ack :: readData :: timeout :: reset :: stopClock :: Nil = Enum(7)
-    val state = Reg(idle)
+  // Registers for position and flags
+  val positionReg    = Reg(SInt(generics.resolutionBits bits)) init(0)
+  val errorReg       = Reg(Bool()) init(False)
+  val warningReg     = Reg(Bool()) init(False)
+  val crcErrorReg    = Reg(Bool()) init(False)
+  val dataReadyReg   = Reg(Bool()) init(False)
 
-    val bitCounter = Reg(UInt(log2Up(64) bits)) init(0)  // Bit counter for data reception
-    val timeoutCounter = Reg(UInt(16 bits)) init(0)      // Timeout counter for 31.25 µs
-    val timeoutLimit = U((clkFreq.toDouble * 31.25e-6).toInt, 16 bits) // 31.25 µs period
+  // CRC6 Instance
+  val crc6 = new CRC6()
 
-    // Registers for position, flags, and CRC
-    val positionReg = Reg(SInt(36 bits)) init(0)
-    val dataShiftReg = Reg(UInt(64 bits)) init(0)
-    val errorFlag = Reg(Bool()) init(False)
-    val warningFlag = Reg(Bool()) init(False)
-    val crcErrorFlag = Reg(Bool()) init(False)
-    val newDataFlag = Reg(Bool()) init(False)
+  // State Machine States
+  val idle :: receiving :: processing :: Nil = Enum(3)
+  val state = RegInit(idle)
 
-    // Clock generation logic
-    val bissClock = Reg(Bool()) init(False)
-    val counter = Reg(UInt(6 bits)) init(0)
-    val clockDivRatio = Reg(UInt(3 bits)) init(0)
+  // Data Reception Registers
+  val bitCounter = Reg(UInt(log2Up(generics.resolutionBits + BisscConstants.frameOverheadBits) bits)) init(0)
+  val dataShiftReg = Reg(UInt((generics.resolutionBits + BisscConstants.frameOverheadBits) bits)) init(0)
 
-    val clockEnable = (counter === clockDivRatio)
-    when(clockEnable) {
-      bissClock := !bissClock
-      counter := 0
-    } otherwise {
-      counter := counter + 1
-    }
-
-    io.bissc.sck := bissClock
-
-    // Main state machine
-    switch(state) {
-      is(idle) {
-        when(io.bissc.miso) {
-          state := request
-        }
-        when(io.reset) {
-          state := reset
-        }
-      }
-
-      is(request) {
-        bissClock := True
-        state := ack
-      }
-
-      is(ack) {
-        when(bissClock.rise() && bitCounter === 1) {
-          when(!io.bissc.miso) {
-            state := readData
-            bitCounter := 0
-          }
-        }
-      }
-
-      is(readData) {
-        when(bissClock.fall()) {
-          dataShiftReg := dataShiftReg(62 downto 0) ## io.bissc.miso
-          bitCounter := bitCounter + 1
-
-          // Read full frame (position + error + warning + CRC)
-          when(bitCounter === (defaultResolution + frameOverheadBits)) {
-            bitCounter := 0
-            processFrame(dataShiftReg)
-            state := timeout
-            timeoutCounter := 0
-          }
-        }
-      }
-
-      is(timeout) {
-        when(io.bissc.miso) {
-          bissClock := False
-          state := stopClock
-        } otherwise {
-          bissClock := True
-          timeoutCounter := timeoutCounter + 1
-
-          when(timeoutCounter === timeoutLimit) {
-            state := stopClock
-          }
-        }
-      }
-
-      is(reset) {
-        bissClock := False
-        timeoutCounter := 0
-
-        when(timeoutCounter < timeoutLimit) {
-          timeoutCounter := timeoutCounter + 1
-        } otherwise {
-          bissClock := True
-          state := idle
-        }
-      }
-
-      is(stopClock) {
-        bissClock := False
-        state := idle
+  // State Machine Logic
+  switch(state) {
+    is(idle) {
+      dataReadyReg := False
+      when(io.startRequest) {
+        state := receiving
+        bitCounter := 0
       }
     }
 
-    // Process received data frame (position, error, warning, CRC)
-    def processFrame(frameData: UInt): Unit = {
-      val alignedData = frameData |<< frameData.leadingZeros
-      val crcRx = alignedData(5 downto 0)
-      val dataRx = alignedData(62 downto 6)
-      val errorWarning = dataRx(1 downto 0)
-      val newPos = defaultResolution match {
-        case 18 => dataRx(19 downto 2).asSInt
-        case 26 => dataRx(27 downto 2).asSInt
-        case 32 => dataRx(33 downto 2).asSInt
-        case 36 => dataRx(37 downto 2).asSInt
-      }
+    is(receiving) {
+      when(io.bissc.ma) { // On rising edge of MA
+        dataShiftReg := (dataShiftReg << 1) | io.bissc.slo.asUInt
+        bitCounter := bitCounter + 1
 
-      // Extract error, warning, and CRC check
-      errorFlag := errorWarning(1) === False
-      warningFlag := errorWarning(0) === False
-      crcErrorFlag := computeCRC(dataRx) =/= crcRx
-
-      // Update position if CRC is valid
-      if (!crcErrorFlag) {
-        positionReg := newPos
-        newDataFlag := True
-      } else {
-        newDataFlag := False
+        when(bitCounter === (generics.resolutionBits + BisscConstants.frameOverheadBits - 1)) {
+          state := processing
+        }
       }
     }
 
-    // CRC logic (moved to separate component for reusability)
-    val crc6 = new CRC6()
-    def computeCRC(data: UInt): UInt = crc6.compute(data)
+    is(processing) {
+      // Extract position and status bits
+      val positionBits = dataShiftReg(generics.resolutionBits + 9 downto 10)
+      val errorBit    = dataShiftReg(9)
+      val warningBit  = dataShiftReg(8)
+      val crcRx       = dataShiftReg(5 downto 0)
+
+      // Compute CRC on received data (position + error + warning)
+      val crcComputed = crc6.compute(dataShiftReg(generics.resolutionBits + 9 downto 6))
+
+      // Update Registers
+      positionReg := positionBits.asSInt
+      errorReg    := errorBit.asBool
+      warningReg  := warningBit.asBool
+      crcErrorReg := crcComputed =/= crcRx
+
+      dataReadyReg := True
+
+      state := idle
+    }
   }
 
-  io.position := area.positionReg
-  io.errorFlag := area.errorFlag
-  io.warningFlag := area.warningFlag
-  io.crcErrorFlag := area.crcErrorFlag
-  io.newDataReady := area.newDataFlag
+  // Assign Outputs
+  io.position      := positionReg
+  io.errorFlag     := errorReg
+  io.warningFlag   := warningReg
+  io.crcErrorFlag  := crcErrorReg
+  io.newDataReady  := dataReadyReg
 }
 
-// Separate CRC6 component for modularity and reuse
+// CRC6 Computation According to BiSS-C Specification
 class CRC6 extends Component {
-  val crc6Table = Vec(UInt(6 bits), 64)
-  crc6Table := Vec(
-    U"6'h00", U"6'h03", U"6'h06", U"6'h05", U"6'h0C", U"6'h0F", U"6'h0A", U"6'h09",
-    U"6'h18", U"6'h1B", U"6'h1E", U"6'h1D", U"6'h14", U"6'h17", U"6'h12", U"6'h11",
-    U"6'h30", U"6'h33", U"6'h36", U"6'h35", U"6'h3C", U"6'h3F", U"6'h3A", U"6'h39",
-    U"6'h28", U"6'h2B", U"6'h2E", U"6'h2D", U"6'h24", U"6'h27", U"6'h22", U"6'h21",
-    U"6'h23", U"6'h20", U"6'h25", U"6'h26", U"6'h2F", U"6'h2C", U"6'h29", U"6'h2A",
-    U"6'h3B", U"6'h38", U"6'h3D", U"6'h3E", U"6'h37", U"6'h34", U"6'h31", U"6'h32",
-    U"6'h13", U"6'h10", U"6'h15", U"6'h16", U"6'h1F", U"6'h1C", U"6'h19", U"6'h1A",
-    U"6'h0B", U"6'h08", U"6'h0D", U"6'h0E", U"6'h07", U"6'h04", U"6'h01", U"6'h02"
-  )
-
+  // Define a method to compute CRC6 on a data word
   def compute(data: UInt): UInt = {
-    var crc = U(0, 6 bits)
-    for (i <- 0 until (data.getWidth / 6)) {
-      val dataSegment = data((6 * i + 5) downto (6 * i))
-      crc = crc6Table((dataSegment ^ crc)(5 downto 0))
+    val crc = Reg(UInt(6 bits)) init(0)
+
+    // Reset CRC
+    crc := 0
+
+    // Iterate over each bit (MSB-first)
+    for (i <- (data.getWidth - 1) downto 0) {
+      val bit = data(i) ^ crc(5)
+      crc(5 downto 1) := crc(4 downto 0)
+      crc(0) := bit
+      when(bit) {
+        crc(5 downto 0) := crc(5 downto 0) ^ 0x03 // Polynomial x^6 + x + 1
+      }
     }
-    ~crc
+
+    ~crc // Invert CRC as per BiSS-C specification
   }
 }
 
-// Define the clock and reset parameters
-case class TestClockConfig(clkPeriod: TimeNumber = 10 ns)
-
-// Test bench for Apb3BisscSlaveCtrl
+// Testbench Simulation
 object Apb3BisscSlaveCtrlSim {
   def main(args: Array[String]): Unit = {
     SimConfig
       .withWave
-      .compile(new Apb3BisscSlaveCtrl(BisscSlaveCtrlMemoryMappedConfig(new BisscGenerics(32, 50 MHz))))
+      .compile(new Apb3BisscSlaveCtrl(BisscSlaveCtrlMemoryMappedConfig(new BisscGenerics(32, 1 MHz))))
       .doSim { dut =>
-        // Generate clock and reset
-        val clkConfig = TestClockConfig()
-        dut.clockDomain.forkStimulus(period = clkConfig.clkPeriod.toLong)
+        // Fork a process to drive the MA clock (Master Clock)
+        fork {
+          while (true) {
+            dut.io.bissc.ma #= true
+            sleep(5) // Half-period for 1 MHz
+            dut.io.bissc.ma #= false
+            sleep(5) // Half-period for 1 MHz
+          }
+        }
 
-        // Reset signal
+        // Initialize Signals
         dut.io.apb.PRESETn #= false
-        sleep(10) // Hold reset for a while
-        dut.io.apb.PRESETn #= true
-
-        // SPI signals (BiSS-C encoder simulation)
-        dut.io.bissc.miso #= false
-        dut.io.bissc.mosi #= false
-        dut.io.bissc.sck #= false
-
-        // APB3 signals initialization
+        dut.io.bissc.slo #= false
         dut.io.apb.PSEL #= false
         dut.io.apb.PENABLE #= false
         dut.io.apb.PWRITE #= false
         dut.io.apb.PADDR #= 0
         dut.io.apb.PWDATA #= 0
 
-        // Simulation step
+        // Release Reset
+        sleep(10)
+        dut.io.apb.PRESETn #= true
+
+        // Define a sample data frame (position + error + warning + CRC)
+        val sampleData = BigInt("000000010010001101000101011001111000100110101011", 2) // Example 32-bit position and status
+
+        // Convert sampleData to bits (MSB-first)
+        val dataBits = (0 until (dut.gens.resolutionBits + BisscConstants.frameOverheadBits)).map { i =>
+          ((sampleData >> (dut.gens.resolutionBits + BisscConstants.frameOverheadBits - 1 - i)) & 1).toInt
+        }.toArray
+
+        // Fork a process to provide SLO data based on dataBits
+        fork {
+          for (bit <- dataBits) {
+            // Wait for rising edge of MA
+            dut.clockDomain.waitRisingEdge()
+            // Set SLO based on the current bit
+            dut.io.bissc.slo #= (bit == 1)
+          }
+        }
+
+        // APB3 Write and Read Functions
         def apbWrite(address: Int, data: Int): Unit = {
+          // APB3 Write Sequence
           dut.io.apb.PSEL #= true
           dut.io.apb.PADDR #= address
           dut.io.apb.PWDATA #= data
           dut.io.apb.PWRITE #= true
           dut.io.apb.PENABLE #= false
-          sleep(1) // Cycle delay
+          sleep(1) // Setup
           dut.io.apb.PENABLE #= true
-          sleep(1) // Acknowledge
+          sleep(1) // Hold
           dut.io.apb.PSEL #= false
+          dut.io.apb.PENABLE #= false
         }
 
         def apbRead(address: Int): Int = {
+          // APB3 Read Sequence
           dut.io.apb.PSEL #= true
           dut.io.apb.PADDR #= address
           dut.io.apb.PWRITE #= false
           dut.io.apb.PENABLE #= false
-          sleep(1) // Cycle delay
+          sleep(1) // Setup
           dut.io.apb.PENABLE #= true
-          sleep(1) // Acknowledge
+          sleep(1) // Hold
           val readValue = dut.io.apb.PRDATA.toInt
           dut.io.apb.PSEL #= false
           readValue
         }
 
-        // Simulate BiSS-C encoder data transmission (simulate an encoder sending valid data)
-        def sendBisscData(data: BigInt): Unit = {
-          val dataBits = data.toString(2).reverse.padTo(64, '0').reverse // 64-bit data (LSB-first)
-          for (i <- 0 until dataBits.length) {
-            dut.io.bissc.miso #= dataBits(i) == '1'
-            dut.io.bissc.sck #= true
-            sleep(1) // Half clock cycle
-            dut.io.bissc.sck #= false
-            sleep(1) // Half clock cycle
-          }
-        }
+        // Send Start Request
+        apbWrite(0x14, 1) // Start request
 
-        // Send a valid BiSS-C frame (simulate a 32-bit position frame with error, warning, and CRC)
-        val validPosition = BigInt("11000000001111000000011100001111000011111111111111111100000000", 2) // Sample data
-        sendBisscData(validPosition)
+        // Wait for Data Ready Interrupt
+        waitUntil(dut.io.interrupt.toBoolean)
 
-        // Read APB3 register for position
+        // Read Position
         val position = apbRead(0x00)
-        println(s"Position: $position")
+        println(s"Position: 0x${position.toHexString}")
 
-        // Assert that the position matches the expected value
-        assert(position == 0x123456) // Replace with actual expected position value
-
-        // Test for error and warning flags
+        // Read Error Flag
         val error = apbRead(0x04)
         println(s"Error Flag: $error")
 
+        // Read Warning Flag
         val warning = apbRead(0x08)
         println(s"Warning Flag: $warning")
 
-        // End simulation
+        // Read CRC Error Flag
+        val crcError = apbRead(0x0C)
+        println(s"CRC Error Flag: $crcError")
+
+        // End Simulation
         simSuccess()
       }
   }
