@@ -1,13 +1,14 @@
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba3.apb._
-import spinal.core.sim._
-
-
+import spinal.lib.crc._
+import spinal.lib.enumeration._
+import spinal.lib.fsm._
+import spinal.lib.misc._
 
 /**
   * =============================================================================
-  *  APB3 Register Mapping
+  * Final APB3 Register Mapping
   *
   * | Register Name           | Address (Hex) | Read/Write | Description                                         |
   * |-------------------------|---------------|------------|-----------------------------------------------------|
@@ -61,24 +62,11 @@ import spinal.core.sim._
   * =============================================================================
   */
 
-
-
-
-// Constants and Configurations
-object BisscConstants {
-  val frameOverheadBits = 10 // Start bit, error, warning, CRC
+object BisscResolution extends SpinalEnum(binarySequential) {
+  val BIT_18, BIT_26, BIT_32, BIT_36 = newElement()
 }
 
-// Enumeration for supported BiSS-C encoder resolutions
-object BisscResolution extends SpinalEnum {
-  val BIT_18 = newElement()
-  val BIT_26 = newElement()
-  val BIT_32 = newElement()
-  val BIT_36 = newElement()
-}
-
-// Companion object for BisscResolution to get bit widths
-object BisscResolution {
+object BisscResolutionHelper {
   def getResolutionBits(resolution: BisscResolution.type#Value): Int = resolution match {
     case BisscResolution.BIT_18 => 18
     case BisscResolution.BIT_26 => 26
@@ -96,7 +84,7 @@ object BisscResolution {
 }
 
 // Generic configuration for BiSS-C controller
-case class BisscGenerics(resolutionBits: Int, maxClockFreq: HertzNumber)
+case class BisscGenerics(resolutionBits: Int, maxClockFreq: HertzNumber, crcBits: Int = 6)
 
 // Configuration for BiSS-C slave control
 case class BisscSlaveCtrlMemoryMappedConfig(ctrlGenerics: BisscGenerics)
@@ -160,6 +148,8 @@ class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Com
 
 // BiSS-C Slave Controller Logic (Master Implementation)
 class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
+  import BisscResolutionHelper._
+
   val io = new Bundle {
     val bissc = master(BissCInterface())
     val position = out SInt (generics.resolutionBits bits)
@@ -193,6 +183,8 @@ class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
 
 // BiSS-C Receiver Logic with Internal Clock Divider and Variable Resolutions
 class BissCReceiver(generics: BisscGenerics) extends Component {
+  import BisscResolutionHelper._
+
   val io = new Bundle {
     val bissc = master(BissCInterface())
     val position = out SInt (generics.resolutionBits bits)
@@ -213,8 +205,14 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   val crcErrorReg    = Reg(Bool()) init(False)
   val dataReadyReg   = Reg(Bool()) init(False)
 
-  // CRC6 Instance
-  val crc6 = new CRC6()
+  // CRC6 Instance using SpinalHDL's CRCGenerator
+  val crc6 = new CRCGenerator(
+    width = 6,
+    polynomial = 0x03,
+    reflectInput = false,
+    reflectOutput = false,
+    finalXOR = 0x3F // Inversion as per BiSS-C
+  )
 
   // Clock Divider for BiSS-C Speed Selection
   val maClock = Reg(Bool()) init(False)
@@ -262,67 +260,64 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   // Compute resolution bits
   val resolutionBits = BisscResolution.getResolutionBits(resolution)
 
-  // State Machine States
-  val idle :: receiving :: processing :: Nil = Enum(3)
-  val state = RegInit(idle)
-
-  // Data Reception Registers
-  // Maximum frame length: 36 (resolution) + 10 (overhead) = 46 bits
-  val bitCounter = Reg(UInt(log2Up(36 + BisscConstants.frameOverheadBits) bits)) init(0)
-  val dataShiftReg = Reg(UInt(46 bits)) init(0) // 36 + 10 bits
-
-  // State Machine Logic
-  switch(state) {
-    is(idle) {
-      dataReadyReg := False
-      when(io.reset) {
-        state := idle
-        bitCounter := 0
-        dataShiftReg := 0
-        positionReg := 0
-        errorReg := False
-        warningReg := False
-        crcErrorReg := False
+  // State Machine using SpinalHDL's FSM
+  val fsm = new StateMachine {
+    val idle = new State with EntryPoint {
+      whenIsActive {
         dataReadyReg := False
-      } elsewhen(io.startRequest) {
-        state := receiving
-        bitCounter := 0
-      }
-    }
-
-    is(receiving) {
-      when(maClock.rise()) { // On rising edge of MA
-        dataShiftReg := (dataShiftReg << 1) | io.bissc.slo.asUInt
-        bitCounter := bitCounter + 1
-
-        when(bitCounter === (resolutionBits + BisscConstants.frameOverheadBits - 1)) {
-          state := processing
+        when(io.reset) {
+          goto(idle)
+          bitCounter := 0
+          dataShiftReg := 0
+          positionReg := 0
+          errorReg := False
+          warningReg := False
+          crcErrorReg := False
+          dataReadyReg := False
+        } elsewhen(io.startRequest) {
+          goto(receiving)
+          bitCounter := 0
         }
       }
     }
 
-    is(processing) {
-      // Extract position and status bits based on resolution
-      val posStart = BisscConstants.frameOverheadBits + resolutionBits - 1
-      val posEnd   = BisscConstants.frameOverheadBits
+    val receiving = new State {
+      whenIsActive {
+        when(maClock.rise()) {
+          dataShiftReg := (dataShiftReg << 1) | io.bissc.slo.asUInt
+          bitCounter := bitCounter + 1
 
-      val positionBits = dataShiftReg(posStart downto posEnd)
-      val errorBit    = dataShiftReg(BisscConstants.frameOverheadBits - 1)
-      val warningBit  = dataShiftReg(BisscConstants.frameOverheadBits - 2)
-      val crcRx       = dataShiftReg(BisscConstants.frameOverheadBits - 7 downto 0)
+          when(bitCounter === (resolutionBits + BisscConstants.frameOverheadBits - 1)) {
+            goto(processing)
+          }
+        }
+      }
+    }
 
-      // Compute CRC on received data (position + error + warning)
-      val crcComputed = crc6.compute(dataShiftReg(posStart downto posEnd + 8)) // Adjust bit range as needed
+    val processing = new State {
+      whenIsActive {
+        // Extract position and status bits based on resolution
+        val posStart = BisscConstants.frameOverheadBits + resolutionBits - 1
+        val posEnd   = BisscConstants.frameOverheadBits
 
-      // Update Registers
-      positionReg := positionBits.asSInt
-      errorReg    := errorBit.asBool
-      warningReg  := warningBit.asBool
-      crcErrorReg := crcComputed =/= crcRx(5 downto 0) // Assuming CRC is 6 bits
+        val positionBits = dataShiftReg(posStart downto posEnd)
+        val errorBit    = dataShiftReg(posEnd - 1)
+        val warningBit  = dataShiftReg(posEnd - 2)
+        val crcRx       = dataShiftReg(posEnd - 7 downto posEnd - 2)
 
-      dataReadyReg := True
+        // Compute CRC on received data (position + error + warning)
+        crc6.io.dataIn := dataShiftReg(posStart downto posEnd + 8) // Adjust bit range as needed
 
-      state := idle
+        // Update Registers
+        positionReg := positionBits.asSInt
+        errorReg    := errorBit.asBool
+        warningReg  := warningBit.asBool
+        crcErrorReg := crc6.io.crcOut =/= crcRx(5 downto 0) // Assuming CRC is 6 bits
+
+        dataReadyReg := True
+
+        goto(idle)
+      }
     }
   }
 
@@ -334,27 +329,22 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   io.newDataReady  := dataReadyReg
 }
 
-// CRC6 Computation According to BiSS-C Specification
-class CRC6 extends Component {
-  // Define a method to compute CRC6 on a data word
-  def compute(data: UInt): UInt = {
-    val crc = Reg(UInt(6 bits)) init(0)
-
-    // Reset CRC
-    crc := 0
-
-    // Iterate over each bit (MSB-first)
-    for (i <- (data.getWidth - 1) downto 0) {
-      val bit = data(i) ^ crc(5)
-      crc(5 downto 1) := crc(4 downto 0)
-      crc(0) := bit
-      when(bit) {
-        crc(5 downto 0) := crc(5 downto 0) ^ 0x03 // Polynomial x^6 + x + 1
-      }
-    }
-
-    ~crc // Invert CRC as per BiSS-C specification
+// CRC6 Computation Using SpinalHDL's CRCGenerator
+class CRCGenerator(width: Int, polynomial: BigInt, reflectInput: Boolean, reflectOutput: Boolean, finalXOR: BigInt) extends Component {
+  val io = new Bundle {
+    val dataIn = in UInt (width bits)
+    val crcOut = out UInt (6 bits)
   }
+
+  val crcGen = CRCGenerator(
+    width = 6,
+    polynomial = polynomial,
+    reflectInput = reflectInput,
+    reflectOutput = reflectOutput,
+    finalXOR = finalXOR
+  )
+
+  io.crcOut := crcGen.compute(io.dataIn)
 }
 
 // Testbench Simulation
@@ -401,7 +391,7 @@ object Apb3BisscSlaveCtrlSim {
           val sampleFrame = (samplePosition << 10) | (if (errorBit) 1 << 9 else 0) | (if (warningBit) 1 << 8 else 0) | crcValue
 
           // Convert sampleFrame to bits (MSB-first)
-          val resolution = BisscResolution.getResolution(dut.io.resolutionConfig)
+          val resolution = BisscResolution.getResolution(UInt(resCode))
           val resolutionBits = BisscResolution.getResolutionBits(resolution)
           val frameBits = resolutionBits + BisscConstants.frameOverheadBits
           val dataBits = (0 until frameBits).map { i =>
@@ -456,44 +446,44 @@ object Apb3BisscSlaveCtrlSim {
         simSuccess()
       }
 
-  // APB3 Write Function
-  def apbWrite(dut: Apb3BisscSlaveCtrl, address: Int, data: Int): Unit = {
-    dut.io.apb.PSEL #= true
-    dut.io.apb.PADDR #= address
-    dut.io.apb.PWDATA #= data
-    dut.io.apb.PWRITE #= true
-    dut.io.apb.PENABLE #= false
-    sleep(1) // Setup
-    dut.io.apb.PENABLE #= true
-    sleep(1) // Hold
-    dut.io.apb.PSEL #= false
-    dut.io.apb.PENABLE #= false
-  }
-
-  // APB3 Read Function
-  def apbRead(dut: Apb3BisscSlaveCtrl, address: Int): Int = {
-    dut.io.apb.PSEL #= true
-    dut.io.apb.PADDR #= address
-    dut.io.apb.PWRITE #= false
-    dut.io.apb.PENABLE #= false
-    sleep(1) // Setup
-    dut.io.apb.PENABLE #= true
-    sleep(1) // Hold
-    val readValue = dut.io.apb.PRDATA.toInt
-    dut.io.apb.PSEL #= false
-    readValue
-  }
-
-  // Scala-based CRC6 computation for simulation purposes
-  def computeCRC6(data: BigInt, width: Int): BigInt = {
-    var crc = 0L
-    for (i <- (width - 1) to 0 by -1) {
-      val bit = ((data >> i) & 1).toInt ^ ((crc >> 5) & 1).toInt
-      crc = ((crc << 1) & 0x3F) | bit
-      if (bit == 1) {
-        crc ^= 0x03 // Polynomial x^6 + x + 1
-      }
+    // APB3 Write Function
+    def apbWrite(dut: Apb3BisscSlaveCtrl, address: Int, data: Int): Unit = {
+      dut.io.apb.PSEL #= true
+      dut.io.apb.PADDR #= address
+      dut.io.apb.PWDATA #= data
+      dut.io.apb.PWRITE #= true
+      dut.io.apb.PENABLE #= false
+      sleep(1) // Setup
+      dut.io.apb.PENABLE #= true
+      sleep(1) // Hold
+      dut.io.apb.PSEL #= false
+      dut.io.apb.PENABLE #= false
     }
-    ~crc & 0x3F // Invert CRC and mask to 6 bits
-  }
+
+    // APB3 Read Function
+    def apbRead(dut: Apb3BisscSlaveCtrl, address: Int): Int = {
+      dut.io.apb.PSEL #= true
+      dut.io.apb.PADDR #= address
+      dut.io.apb.PWRITE #= false
+      dut.io.apb.PENABLE #= false
+      sleep(1) // Setup
+      dut.io.apb.PENABLE #= true
+      sleep(1) // Hold
+      val readValue = dut.io.apb.PRDATA.toInt
+      dut.io.apb.PSEL #= false
+      readValue
+    }
+
+    // Scala-based CRC6 computation for simulation purposes
+    def computeCRC6(data: BigInt, width: Int): BigInt = {
+      var crc = 0L
+      for (i <- (width - 1) to 0 by -1) {
+        val bit = ((data >> i) & 1).toInt ^ ((crc >> 5) & 1).toInt
+        crc = ((crc << 1) & 0x3F) | bit
+        if (bit == 1) {
+          crc ^= 0x03 // Polynomial x^6 + x + 1
+        }
+      }
+      ~crc & 0x3F // Invert CRC and mask to 6 bits
+    }
 }
