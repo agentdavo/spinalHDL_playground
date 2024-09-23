@@ -3,6 +3,67 @@ import spinal.lib._
 import spinal.lib.bus.amba3.apb._
 import spinal.core.sim._
 
+
+
+/**
+  * =============================================================================
+  *  APB3 Register Mapping
+  *
+  * | Register Name           | Address (Hex) | Read/Write | Description                                         |
+  * |-------------------------|---------------|------------|-----------------------------------------------------|
+  * | **Position Data**       | `0x00`        | Read-only  | 32/36-bit position data                             |
+  * | **Error Status**        | `0x04`        | Read-only  | Error flag                                          |
+  * | **Warning Status**      | `0x08`        | Read-only  | Warning flag                                        |
+  * | **CRC Error Status**    | `0x0C`        | Read-only  | CRC error flag                                      |
+  * | **Reset Control**       | `0x10`        | Write-only | Resets the controller                               |
+  * | **Start Request**       | `0x14`        | Write-only | Initiates data reception                            |
+  * | **Speed Selection**     | `0x18`        | Write-only | Configures data reception speed                     |
+  * | **Resolution Selection**| `0x1C`        | Write-only | Configures encoder resolution (18, 26, 32, 36-bit)  |
+  * | **Interrupt Status**    | `0x20`        | Read-only  | Indicates data ready or error conditions            |
+  *
+  * =============================================================================
+  *
+  * **Register Descriptions:**
+  * - **Position Data (`0x00`)**: Provides the current position from the encoder.
+  *   - Supports both 32-bit and 36-bit resolutions based on the resolution configuration.
+  *
+  * - **Error Status (`0x04`)**: Indicates if an error has occurred during data reception.
+  *
+  * - **Warning Status (`0x08`)**: Signals warning conditions that may require attention.
+  *
+  * - **CRC Error Status (`0x0C`)**: Flags a CRC mismatch, ensuring data integrity.
+  *
+  * - **Reset Control (`0x10`)**: Writing to this register resets the controller to its initial state.
+  *
+  * - **Start Request (`0x14`)**: Initiates the data reception process when written to.
+  *
+  * - **Speed Selection (`0x18`)**: Allows configuration of the data reception speed.
+  *   - **Values:**
+  *     - `0`: 1 MHz
+  *     - `1`: 2 MHz
+  *     - `2`: 5 MHz
+  *     - `3`: 10 MHz
+  *
+  * - **Resolution Selection (`0x1C`)**: Sets the encoder resolution.
+  *   - **Values:**
+  *     - `0`: 18-bit
+  *     - `1`: 26-bit
+  *     - `2`: 32-bit
+  *     - `3`: 36-bit
+  *
+  * - **Interrupt Status (`0x20`)**: Reflects the interrupt conditions, such as data readiness or errors.
+  *
+  * **Usage Notes:**
+  * - Ensure that the **Resolution Selection** is configured before initiating data reception.
+  * - The **CRC Error Status** should be checked to verify data integrity after each reception.
+  * - Writing to the **Reset Control** will clear all registers and reset the state machine.
+  *
+  * =============================================================================
+  */
+
+
+
+
 // Constants and Configurations
 object BisscConstants {
   val frameOverheadBits = 10 // Start bit, error, warning, CRC
