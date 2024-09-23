@@ -167,7 +167,16 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   switch(state) {
     is(idle) {
       dataReadyReg := False
-      when(io.startRequest) {
+      when(io.reset) {
+        state := idle
+        bitCounter := 0
+        dataShiftReg := 0
+        positionReg := 0
+        errorReg := False
+        warningReg := False
+        crcErrorReg := False
+        dataReadyReg := False
+      } elsewhen(io.startRequest) {
         state := receiving
         bitCounter := 0
       }
@@ -214,7 +223,9 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   io.newDataReady  := dataReadyReg
 }
 
-// CRC6 Computation According to BiSS-C Specification
+
+
+
 class CRC6 extends Component {
   // Define a method to compute CRC6 on a data word
   def compute(data: UInt): UInt = {
@@ -237,7 +248,9 @@ class CRC6 extends Component {
   }
 }
 
-// Testbench Simulation
+
+
+
 object Apb3BisscSlaveCtrlSim {
   def main(args: Array[String]): Unit = {
     SimConfig
@@ -256,6 +269,7 @@ object Apb3BisscSlaveCtrlSim {
         // Release Reset
         sleep(20)
         dut.io.apb.PRESETn #= true
+        sleep(20)
 
         // Define a sample BiSS-C frame (position + error + warning + CRC)
         // For example, 32-bit position, 1 error bit, 1 warning bit, 6 CRC bits
@@ -263,10 +277,22 @@ object Apb3BisscSlaveCtrlSim {
         val errorBit = false
         val warningBit = false
         // Compute CRC for position + error + warning
-        val crcInput = (samplePosition << 10) | (errorBit.toInt << 9) | (warningBit.toInt << 8)
-        val crc6 = new CRC6()
-        val crcValue = crc6.compute(crcInput.asUInt((32 + 10) bits)).toBigInt
-        val sampleFrame = (samplePosition << 10) | (errorBit.toInt << 9) | (warningBit.toInt << 8) | crcValue
+        // Implement CRC6 as a pure Scala function for simulation
+        def computeCRC6(data: BigInt, width: Int): BigInt = {
+          var crc = 0L
+          for (i <- (width - 1) to 0 by -1) {
+            val bit = ((data >> i) & 1).toInt ^ ((crc >> 5) & 1).toInt
+            crc = ((crc << 1) & 0x3F) | bit
+            if (bit == 1) {
+              crc ^= 0x03 // Polynomial x^6 + x + 1
+            }
+          }
+          ~crc & 0x3F // Invert CRC and mask to 6 bits
+        }
+
+        val crcInput = (samplePosition << 10) | (if (errorBit) 1 << 9 else 0) | (if (warningBit) 1 << 8 else 0)
+        val crcValue = computeCRC6(crcInput, 32 + 2) // 32 position bits + 2 status bits
+        val sampleFrame = (samplePosition << 10) | (if (errorBit) 1 << 9 else 0) | (if (warningBit) 1 << 8 else 0) | crcValue
 
         // Convert sampleFrame to bits (MSB-first)
         val dataBits = (0 until (dut.gens.resolutionBits + BisscConstants.frameOverheadBits)).map { i =>
@@ -276,7 +302,7 @@ object Apb3BisscSlaveCtrlSim {
         // Fork a process to provide SLO data based on dataBits
         fork {
           // Wait until startRequest is asserted
-          waitUntil(dut.io.bissc.ma.toBoolean && dut.io.startRequest.toBoolean)
+          waitUntil(dut.io.bissc.ma.toBoolean && dut.io.startRequest.toBoolean) // Start of frame
           for (bit <- dataBits) {
             // Wait for rising edge of MA
             dut.clockDomain.waitRisingEdge()
@@ -319,9 +345,12 @@ object Apb3BisscSlaveCtrlSim {
 
         // Send Start Request
         apbWrite(0x14, 1) // Start request
+        sleep(1)
+        apbWrite(0x14, 0) // De-assert start request to make it a pulse
 
         // Wait for Data Ready Interrupt
         waitUntil(dut.io.interrupt.toBoolean)
+        sleep(1)
 
         // Read Position
         val position = apbRead(0x00)
