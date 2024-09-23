@@ -1,6 +1,7 @@
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba3.apb._
+import spinal.core.sim._
 
 // Constants and Configurations
 object BisscConstants {
@@ -21,14 +22,14 @@ object Apb3BisscSlaveCtrl {
   )
 }
 
-// BiSS-C Interface Definition
+// BiSS-C Interface Definition (Master Role)
 case class BissCInterface() extends Bundle with IMasterSlave {
-  val ma  = Bool()  // Master Clock (input to slave)
-  val slo = Bool()  // Slave Output (output from slave)
+  val ma  = Bool()  // Master Clock (output from master)
+  val slo = Bool()  // Slave Output (input to master)
 
   override def asMaster(): Unit = {
-    in(ma)
-    out(slo)
+    out(ma)
+    in(slo)
   }
 }
 
@@ -56,13 +57,17 @@ class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Com
   busCtrl.drive(bisscCtrl.io.reset,        0x10, "Reset control")
   busCtrl.drive(bisscCtrl.io.startRequest, 0x14, "Start request")
 
+  // BiSS-C Speed Selection Register (Write-Only)
+  // 0x18: Speed Selection (0: 1 MHz, 1: 2 MHz, 2: 5 MHz, 3: 10 MHz)
+  busCtrl.drive(bisscCtrl.io.speedConfig,  0x18, "BiSS-C Speed Selection")
+
   // Interrupt Logic
   val interruptSignal = bisscCtrl.io.dataReady || bisscCtrl.io.error || bisscCtrl.io.crcError
   io.interrupt := interruptSignal
-  busCtrl.read(interruptSignal,              0x18, "Interrupt status")
+  busCtrl.read(interruptSignal,              0x1C, "Interrupt status")
 }
 
-// BiSS-C Slave Controller Logic
+// BiSS-C Slave Controller Logic (Master Implementation)
 class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
   val io = new Bundle {
     val bissc = master(BissCInterface())
@@ -73,6 +78,7 @@ class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
     val reset = in Bool()
     val startRequest = in Bool()
     val dataReady = out Bool()
+    val speedConfig = in UInt(2 bits) // BiSS-C Speed Selection
   }
 
   // Instantiate the BiSS-C Receiver
@@ -89,9 +95,10 @@ class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
   // Control Signals
   bissReceiver.io.reset        := io.reset
   bissReceiver.io.startRequest := io.startRequest
+  bissReceiver.io.speedConfig  := io.speedConfig
 }
 
-// BiSS-C Receiver Logic
+// BiSS-C Receiver Logic with Internal Clock Divider
 class BissCReceiver(generics: BisscGenerics) extends Component {
   val io = new Bundle {
     val bissc = master(BissCInterface())
@@ -101,6 +108,7 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
     val crcErrorFlag = out Bool()
     val reset = in Bool()
     val startRequest = in Bool()
+    val speedConfig = in UInt(2 bits) // BiSS-C Speed Selection
     val newDataReady = out Bool()
   }
 
@@ -113,6 +121,39 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
 
   // CRC6 Instance
   val crc6 = new CRC6()
+
+  // Clock Divider for BiSS-C Speed Selection
+  val maClock = Reg(Bool()) init(False)
+  val clockDivider = Reg(UInt(16 bits)) init(0)
+  val currentDivider = Reg(UInt(16 bits)) init(50) // Default 1 MHz (50 MHz / 50)
+
+  // Define possible speed settings
+  // 0: 1 MHz (50 MHz / 50)
+  // 1: 2 MHz (50 MHz / 25)
+  // 2: 5 MHz (50 MHz / 10)
+  // 3: 10 MHz (50 MHz / 5)
+  val dividerValues = Vec(UInt(16 bits), 4)
+  dividerValues(0) := 50   // 1 MHz
+  dividerValues(1) := 25   // 2 MHz
+  dividerValues(2) := 10   // 5 MHz
+  dividerValues(3) := 5    // 10 MHz
+
+  // Update the divider based on speedConfig
+  when(io.speedConfig < dividerValues.length) {
+    currentDivider := dividerValues(io.speedConfig)
+  } otherwise {
+    currentDivider := 50 // Default to 1 MHz if invalid
+  }
+
+  // Clock Divider Logic
+  when(clockDivider === (currentDivider - 1)) {
+    maClock := ~maClock
+    clockDivider := 0
+  } otherwise {
+    clockDivider := clockDivider + 1
+  }
+
+  io.bissc.ma := maClock // Drive the MA clock
 
   // State Machine States
   val idle :: receiving :: processing :: Nil = Enum(3)
@@ -133,7 +174,7 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
     }
 
     is(receiving) {
-      when(io.bissc.ma) { // On rising edge of MA
+      when(maClock.rise()) { // On rising edge of MA
         dataShiftReg := (dataShiftReg << 1) | io.bissc.slo.asUInt
         bitCounter := bitCounter + 1
 
@@ -201,18 +242,8 @@ object Apb3BisscSlaveCtrlSim {
   def main(args: Array[String]): Unit = {
     SimConfig
       .withWave
-      .compile(new Apb3BisscSlaveCtrl(BisscSlaveCtrlMemoryMappedConfig(new BisscGenerics(32, 1 MHz))))
+      .compile(new Apb3BisscSlaveCtrl(BisscSlaveCtrlMemoryMappedConfig(new BisscGenerics(32, 50 MHz))))
       .doSim { dut =>
-        // Fork a process to drive the MA clock (Master Clock)
-        fork {
-          while (true) {
-            dut.io.bissc.ma #= true
-            sleep(5) // Half-period for 1 MHz
-            dut.io.bissc.ma #= false
-            sleep(5) // Half-period for 1 MHz
-          }
-        }
-
         // Initialize Signals
         dut.io.apb.PRESETn #= false
         dut.io.bissc.slo #= false
@@ -223,19 +254,29 @@ object Apb3BisscSlaveCtrlSim {
         dut.io.apb.PWDATA #= 0
 
         // Release Reset
-        sleep(10)
+        sleep(20)
         dut.io.apb.PRESETn #= true
 
-        // Define a sample data frame (position + error + warning + CRC)
-        val sampleData = BigInt("000000010010001101000101011001111000100110101011", 2) // Example 32-bit position and status
+        // Define a sample BiSS-C frame (position + error + warning + CRC)
+        // For example, 32-bit position, 1 error bit, 1 warning bit, 6 CRC bits
+        val samplePosition = 0x12345678 // Example position
+        val errorBit = false
+        val warningBit = false
+        // Compute CRC for position + error + warning
+        val crcInput = (samplePosition << 10) | (errorBit.toInt << 9) | (warningBit.toInt << 8)
+        val crc6 = new CRC6()
+        val crcValue = crc6.compute(crcInput.asUInt((32 + 10) bits)).toBigInt
+        val sampleFrame = (samplePosition << 10) | (errorBit.toInt << 9) | (warningBit.toInt << 8) | crcValue
 
-        // Convert sampleData to bits (MSB-first)
+        // Convert sampleFrame to bits (MSB-first)
         val dataBits = (0 until (dut.gens.resolutionBits + BisscConstants.frameOverheadBits)).map { i =>
-          ((sampleData >> (dut.gens.resolutionBits + BisscConstants.frameOverheadBits - 1 - i)) & 1).toInt
+          ((sampleFrame >> (dut.gens.resolutionBits + BisscConstants.frameOverheadBits - 1 - i)) & 1).toInt
         }.toArray
 
         // Fork a process to provide SLO data based on dataBits
         fork {
+          // Wait until startRequest is asserted
+          waitUntil(dut.io.bissc.ma.toBoolean && dut.io.startRequest.toBoolean)
           for (bit <- dataBits) {
             // Wait for rising edge of MA
             dut.clockDomain.waitRisingEdge()
@@ -272,6 +313,9 @@ object Apb3BisscSlaveCtrlSim {
           dut.io.apb.PSEL #= false
           readValue
         }
+
+        // Configure BiSS-C Speed (e.g., 1 MHz)
+        apbWrite(0x18, 0) // Speed Selection: 0 -> 1 MHz
 
         // Send Start Request
         apbWrite(0x14, 1) // Start request
