@@ -8,21 +8,21 @@ import spinal.lib.misc._
 
 /**
   * =============================================================================
-  * Final APB3 Register Mapping
+  * APB3 Register Mapping
   *
-  * | Register Name           | Address (Hex) | Read/Write | Description                                         |
-  * |-------------------------|---------------|------------|-----------------------------------------------------|
-  * | **Position Data**       | `0x00`        | Read-only  | 32/36-bit position data                             |
-  * | **Error Status**        | `0x04`        | Read-only  | Error flag                                          |
-  * | **Warning Status**      | `0x08`        | Read-only  | Warning flag                                        |
-  * | **CRC Error Status**    | `0x0C`        | Read-only  | CRC error flag                                      |
-  * | **Reset Control**       | `0x10`        | Write-only | Resets the controller                               |
-  * | **Start Request**       | `0x14`        | Write-only | Initiates data reception                            |
-  * | **Speed Selection**     | `0x18`        | Write-only | Configures data reception speed                     |
-  * | **Resolution Selection**| `0x1C`        | Write-only | Configures encoder resolution (18, 26, 32, 36-bit)  |
-  * | **Interrupt Status**    | `0x20`        | Read-only  | Indicates data ready or error conditions            |
-  * | **Turn Count**          | `0x24`        | Read-only  | Number of completed turns (32-bit)                   |
-  * | **Over-Run Status**     | `0x28`        | Read-only  | Indicates if Turn Count has reached maximum          |
+  * | Register Name            | Address (Hex) | Read/Write | Description                                             |
+  * |--------------------------|---------------|------------|---------------------------------------------------------|
+  * | **Position Data**        | `0x00`        | Read-only  | 32/36-bit position data                                 |
+  * | **Error Status**         | `0x04`        | Read-only  | Error flag                                              |
+  * | **Warning Status**       | `0x08`        | Read-only  | Warning flag                                            |
+  * | **CRC Error Status**     | `0x0C`        | Read-only  | CRC error flag                                          |
+  * | **Reset Control**        | `0x10`        | Write-only | Resets the controller                                   |
+  * | **Start Request**        | `0x14`        | Write-only | Initiates data reception                                 |
+  * | **Speed Selection**      | `0x18`        | Write-only | Configures data reception speed                          |
+  * | **Resolution Selection** | `0x1C`        | Write-only | Configures encoder resolution (18, 26, 32, 36-bit)       |
+  * | **Interrupt Status**     | `0x20`        | Read-only  | Indicates data ready or error conditions                 |
+  * | **Turn Count**           | `0x24`        | Read-only  | 32-bit signed integer representing the number of completed turns |
+  * | **Over-Run Status**      | `0x28`        | Read-only  | Indicates if Turn Count has exceeded its signed range     |
   *
   * =============================================================================
   *
@@ -56,23 +56,37 @@ import spinal.lib.misc._
   *
   * - **Interrupt Status (`0x20`)**: Reflects the interrupt conditions, such as data readiness or errors.
   *
-  * - **Turn Count (`0x24`)**: Displays the number of completed turns.
+  * - **Turn Count (`0x24`)**: Represents the number of completed turns since the system started or last reset.
+  *   - **Type**: Signed 32-bit integer (`SInt`).
+  *   - **Behavior**: Increments or decrements based on the direction of rotation.
   *
-  * - **Over-Run Status (`0x28`)**: Indicates if the Turn Count has reached its maximum value (`0xFFFFFFFF`).
+  * - **Over-Run Status (`0x28`)**: Indicates if the Turn Count has exceeded its maximum or minimum representable value.
+  *   - **Behavior**: Set when Turn Count reaches `+0x7FFFFFFF` or `-0x80000000`.
   *
   * **Usage Notes:**
   * - Ensure that the **Resolution Selection** is configured before initiating data reception.
   * - The **CRC Error Status** should be checked to verify data integrity after each reception.
   * - Writing to the **Reset Control** will clear all registers and reset the state machine.
-  * - Monitor the **Over-Run Status** to prevent counter overflow issues.
+  * - Monitor the **Over-Run Status** to prevent counter overflow or underflow issues.
   *
   * =============================================================================
   */
+import spinal.core._
+import spinal.lib._
+import spinal.lib.bus.amba3.apb._
+import spinal.lib.crc._
+import spinal.lib.enumeration._
+import spinal.lib.fsm._
+import spinal.lib.misc._
+
+/** Enumeration for supported BiSS-C encoder resolutions */
 object BisscResolution extends SpinalEnum(binarySequential) {
   val BIT_18, BIT_26, BIT_32, BIT_36 = newElement()
 }
 
+/** Helper object for BisscResolution enumeration */
 object BisscResolutionHelper {
+  /** Returns the bit width for a given resolution */
   def getResolutionBits(resolution: BisscResolution.type#Value): Int = resolution match {
     case BisscResolution.BIT_18 => 18
     case BisscResolution.BIT_26 => 26
@@ -80,6 +94,7 @@ object BisscResolutionHelper {
     case BisscResolution.BIT_36 => 36
   }
 
+  /** Maps resolution code to BisscResolution enumeration */
   def getResolution(resolutionCode: UInt): BisscResolution.type#Value = resolutionCode.toInt match {
     case 0 => BisscResolution.BIT_18
     case 1 => BisscResolution.BIT_26
@@ -89,13 +104,13 @@ object BisscResolutionHelper {
   }
 }
 
-// Generic configuration for BiSS-C controller
+/** Generic configuration for BiSS-C controller */
 case class BisscGenerics(resolutionBits: Int, maxClockFreq: HertzNumber, crcBits: Int = 6)
 
-// Configuration for BiSS-C slave control
+/** Configuration for BiSS-C slave control */
 case class BisscSlaveCtrlMemoryMappedConfig(ctrlGenerics: BisscGenerics)
 
-// Configuration for APB3 interface
+/** Configuration for APB3 interface */
 object Apb3BisscSlaveCtrl {
   def getApb3Config = Apb3Config(
     addressWidth = 16,
@@ -103,7 +118,7 @@ object Apb3BisscSlaveCtrl {
   )
 }
 
-// BiSS-C Interface Definition (Master Role)
+/** BiSS-C Interface Definition (Master Role) */
 case class BissCInterface() extends Bundle with IMasterSlave {
   val ma  = Bool()  // Master Clock (output from master)
   val slo = Bool()  // Slave Output (input to master)
@@ -114,7 +129,7 @@ case class BissCInterface() extends Bundle with IMasterSlave {
   }
 }
 
-// BiSS-C Slave Controller with APB3 Integration
+/** BiSS-C Slave Controller with APB3 Integration */
 class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Component {
   val io = new Bundle {
     val apb = slave(Apb3(Apb3BisscSlaveCtrl.getApb3Config))
@@ -154,7 +169,7 @@ class Apb3BisscSlaveCtrl(generics: BisscSlaveCtrlMemoryMappedConfig) extends Com
   busCtrl.read(interruptSignal,                0x20, "Interrupt status")
 }
 
-// BiSS-C Slave Controller Logic (Master Implementation)
+/** BiSS-C Slave Controller Logic (Master Implementation) */
 class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
   import BisscResolutionHelper._
 
@@ -164,7 +179,7 @@ class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
     val error = out Bool()
     val warning = out Bool()
     val crcError = out Bool()
-    val turnCount = out UInt (32 bits)
+    val turnCount = out SInt (32 bits)
     val overRunStatus = out Bool()
     val reset = in Bool()
     val startRequest = in Bool()
@@ -187,13 +202,13 @@ class BisscSlaveCtrl(generics: BisscGenerics) extends Component {
   io.dataReady    := bissReceiver.io.newDataReady
 
   // Control Signals
-  bissReceiver.io.reset           := io.reset
-  bissReceiver.io.startRequest    := io.startRequest
-  bissReceiver.io.speedConfig     := io.speedConfig
-  bissReceiver.io.resolutionConfig:= io.resolutionConfig
+  bissReceiver.io.reset            := io.reset
+  bissReceiver.io.startRequest     := io.startRequest
+  bissReceiver.io.speedConfig      := io.speedConfig
+  bissReceiver.io.resolutionConfig := io.resolutionConfig
 }
 
-// BiSS-C Receiver Logic with Internal Clock Divider and Variable Resolutions
+/** BiSS-C Receiver Logic with Internal Clock Divider and Variable Resolutions */
 class BissCReceiver(generics: BisscGenerics) extends Component {
   import BisscResolutionHelper._
 
@@ -203,7 +218,7 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
     val errorFlag = out Bool()
     val warningFlag = out Bool()
     val crcErrorFlag = out Bool()
-    val turnCount = out UInt (32 bits)
+    val turnCount = out SInt (32 bits)
     val overRunStatus = out Bool()
     val reset = in Bool()
     val startRequest = in Bool()
@@ -217,7 +232,7 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   val errorReg       = Reg(Bool()) init(False)
   val warningReg     = Reg(Bool()) init(False)
   val crcErrorReg    = Reg(Bool()) init(False)
-  val turnCountReg    = Reg(UInt(32 bits)) init(0)
+  val turnCountReg    = Reg(SInt(32 bits)) init(0)
   val overRunReg     = Reg(Bool()) init(False)
   val dataReadyReg   = Reg(Bool()) init(False)
 
@@ -334,10 +349,10 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
         errorReg    := errorBit.asBool
         warningReg  := warningBit.asBool
         crcErrorReg := crc6.io.crcOut =/= crcRx(5 downto 0) // Assuming CRC is 6 bits
-        turnCountReg := turnCountBits.asUInt
+        turnCountReg := turnCountBits.asSInt
 
         // Detect Over-Run
-        overRunReg := turnCountReg === U"32'hFFFFFFFF"
+        overRunReg := (turnCountReg === S"32'h7FFFFFFF") | (turnCountReg === S"32'h80000000")
 
         dataReadyReg := True
 
@@ -356,26 +371,26 @@ class BissCReceiver(generics: BisscGenerics) extends Component {
   io.newDataReady  := dataReadyReg
 }
 
-// CRC6 Computation Using SpinalHDL's CRCGenerator
-class CRC6Computation extends Component {
+/** CRC6 Computation Using SpinalHDL's CRCGenerator */
+class CRCGenerator(width: Int, polynomial: BigInt, reflectInput: Boolean, reflectOutput: Boolean, finalXOR: BigInt) extends Component {
   val io = new Bundle {
-    val dataIn  = in UInt (46 bits) // Adjust based on frame size
-    val crcOut  = out UInt (6 bits)
+    val dataIn = in UInt (width bits)
+    val crcOut = out UInt (6 bits)
   }
 
   val crcGen = CRCGenerator(
     width = 6,
-    polynomial = 0x03,
-    reflectInput = false,
-    reflectOutput = false,
-    finalXOR = 0x3F // Inversion as per BiSS-C
+    polynomial = polynomial,
+    reflectInput = reflectInput,
+    reflectOutput = reflectOutput,
+    finalXOR = finalXOR
   )
 
   crcGen.io.dataIn := io.dataIn
   io.crcOut := crcGen.io.crcOut
 }
 
-// Testbench Simulation
+/** Testbench Simulation */
 object Apb3BisscSlaveCtrlSim {
   def main(args: Array[String]): Unit = {
     SimConfig
@@ -398,10 +413,10 @@ object Apb3BisscSlaveCtrlSim {
 
         // Define a list of test resolutions and corresponding sample positions and turn counts
         val testResolutions = List(
-          (0, 0x00003FFF, 0x00000001),       // 18-bit, 1 turn
-          (1, 0x03FFFFFF, 0x00000002),       // 26-bit, 2 turns
-          (2, 0xFFFFFFFF, 0x00000003),       // 32-bit, 3 turns
-          (3, 0x0FFFFFFFFF, 0x00000004)      // 36-bit, 4 turns
+          (0, 0x00003FFF, 0x00000001),       // 18-bit, +1 turn
+          (1, 0x03FFFFFF, 0x00000002),       // 26-bit, +2 turns
+          (2, 0xFFFFFFFF, 0xFFFFFFFF),       // 32-bit, -1 turn (two's complement)
+          (3, 0x0FFFFFFFFF, 0x80000000)      // 36-bit, -2147483648 turns (over-run scenario)
         )
 
         for ((resCode, samplePosition, sampleTurnCount) <- testResolutions) {
@@ -416,7 +431,13 @@ object Apb3BisscSlaveCtrlSim {
           val warningBit = false
           val crcInput = (samplePosition << 10) | (if (errorBit) 1 << 9 else 0) | (if (warningBit) 1 << 8 else 0)
           val crcValue = computeCRC6(crcInput, BisscResolution.getResolutionBits(BisscResolution.getResolution(resCode)) + 2) // positionBits + error + warning
-          val sampleFrame = (samplePosition << 10) | (if (errorBit) 1 << 9 else 0) | (if (warningBit) 1 << 8 else 0) | crcValue | (sampleTurnCount << (BisscResolution.getResolutionBits(BisscResolution.getResolution(resCode)) + BisscConstants.frameOverheadBits))
+          val turnCountSigned = BigInt(sampleTurnCount).toInt // Interpret sampleTurnCount as signed integer
+          val turnCount = if (turnCountSigned < 0) {
+            (BigInt(1) << 32) + turnCountSigned
+          } else {
+            BigInt(turnCountSigned)
+          }
+          val sampleFrame = (BigInt(samplePosition) << (10 + 32)) | (BigInt(crcValue) << 32) | (turnCount << 0)
 
           // Convert sampleFrame to bits (MSB-first)
           val resolution = BisscResolution.getResolution(UInt(resCode))
@@ -452,8 +473,13 @@ object Apb3BisscSlaveCtrlSim {
           println(s"Resolution: ${resolution.getName}, Position: 0x${position.toHexString}")
 
           // Read Turn Count
-          val turnCount = apbRead(dut, 0x24)
-          println(s"Turn Count: 0x${turnCount.toHexString}")
+          val turnCountRead = apbRead(dut, 0x24)
+          val turnCountSignedRead = if (turnCountRead >= 0x80000000) {
+            turnCountRead - (1 << 32)
+          } else {
+            turnCountRead
+          }
+          println(s"Turn Count: $turnCountSignedRead")
 
           // Read Over-Run Status
           val overRun = apbRead(dut, 0x28)
@@ -478,21 +504,23 @@ object Apb3BisscSlaveCtrlSim {
           assert(position.toBigInt == samplePosition, s"Position mismatch for resolution code $resCode")
 
           // Validate Turn Count
-          assert(turnCount.toBigInt == sampleTurnCount, s"Turn Count mismatch for resolution code $resCode")
+          assert(turnCountSignedRead == sampleTurnCount, s"Turn Count mismatch for resolution code $resCode")
 
           // Validate Over-Run Status
-          if (sampleTurnCount == 0xFFFFFFFF) {
+          if (turnCountSignedRead == Int.MaxValue || turnCountSignedRead == Int.MinValue) {
             assert(overRun, s"Over-Run should be asserted for resolution code $resCode")
           } else {
             assert(!overRun, s"Over-Run should not be asserted for resolution code $resCode")
           }
+
+          println("-----------------------------------------------------")
         }
 
         // End Simulation
         simSuccess()
       }
 
-      // APB3 Write Function
+      /** APB3 Write Function */
       def apbWrite(dut: Apb3BisscSlaveCtrl, address: Int, data: Int): Unit = {
         dut.io.apb.PSEL #= true
         dut.io.apb.PADDR #= address
@@ -506,7 +534,7 @@ object Apb3BisscSlaveCtrlSim {
         dut.io.apb.PENABLE #= false
       }
 
-      // APB3 Read Function
+      /** APB3 Read Function */
       def apbRead(dut: Apb3BisscSlaveCtrl, address: Int): Int = {
         dut.io.apb.PSEL #= true
         dut.io.apb.PADDR #= address
@@ -520,7 +548,7 @@ object Apb3BisscSlaveCtrlSim {
         readValue
       }
 
-      // Scala-based CRC6 computation for simulation purposes
+      /** Scala-based CRC6 computation for simulation purposes */
       def computeCRC6(data: BigInt, width: Int): BigInt = {
         var crc = 0L
         for (i <- (width - 1) to 0 by -1) {
@@ -532,4 +560,9 @@ object Apb3BisscSlaveCtrlSim {
         }
         ~crc & 0x3F // Invert CRC and mask to 6 bits
       }
+    }
+
+/** Constants used in the BiSS-C protocol */
+object BisscConstants {
+  val frameOverheadBits = 10 // Start bit, error, warning, CRC
 }
